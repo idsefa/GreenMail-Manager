@@ -1,0 +1,55 @@
+services:
+  greenmail-manager:
+    image: greenmail-manager:latest
+    build:
+      context: .
+    container_name: greenmail-manager
+    ports:
+      - "${APP_PORT:-3000}:3000"   # HTTP API + Web UI
+      - "${TCP_PORT_PUBLIC:-3888}:3888"   # Device TCP server
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      NODE_ENV: production
+      PORT: 3000
+      TCP_PORT: 3888
+      DATA_DIR: /data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - greenmail
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: greenmail-manager-nginx
+    profiles: ["proxy"]
+    depends_on:
+      greenmail-manager:
+        condition: service_healthy
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - greenmail
+
+networks:
+  greenmail:
+    name: greenmail-network

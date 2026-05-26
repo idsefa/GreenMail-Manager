@@ -1,0 +1,7 @@
+node_modules
+client/node_modules
+client/dist
+data
+*.db
+.git
+AI-API-SPEC-v1.1

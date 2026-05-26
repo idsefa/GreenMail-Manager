@@ -1,0 +1,18 @@
+{
+  "name": "greenmail-manager",
+  "version": "1.0.0",
+  "description": "Multi-device management web application for GreenMail development boards",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "build:client": "cd client && npm install && npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "helmet": "^8.0.0",
+    "ws": "^8.18.0"
+  }
+}
