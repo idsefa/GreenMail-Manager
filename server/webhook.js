@@ -1,6 +1,7 @@
 const express = require('express');
-const { processMessage } = require('./message-handler');
 const { recordInterfaceLog } = require('./interface-log');
+const { enqueueMessage } = require('./message-queue');
+const logger = require('./logger');
 
 const router = express.Router();
 
@@ -160,6 +161,30 @@ router.post('/', (req, res) => {
   const msg = parseMessage(req);
   const responseBody = msg && Number(msg.type) === 100 ? buildTimeSyncString() : { status: 'ok' };
 
+  if (msg) {
+    try {
+      enqueueMessage(msg, { transport: 'webhook-post', remoteAddr: req.ip });
+    } catch (err) {
+      recordInterfaceLog({
+        dev_id: msg.devId || '',
+        protocol: 'webhook',
+        direction: 'in',
+        endpoint: '/api/webhook',
+        method: 'POST',
+        status: 'failed',
+        request_summary: `type=${msg.type || ''} devId=${msg.devId || ''}`,
+        response_summary: `queue rejected: ${err.message}`,
+        request_raw: req.body,
+        response_raw: { status: 'retry' },
+        remote_addr: req.ip
+      });
+      logger.error('webhook', 'Message was not accepted by the persistent queue', {
+        error: err.message, devId: msg.devId || '', method: 'POST'
+      });
+      return res.status(503).json({ status: 'retry' });
+    }
+  }
+
   recordInterfaceLog({
     dev_id: msg?.devId || '',
     protocol: 'webhook',
@@ -179,17 +204,6 @@ router.post('/', (req, res) => {
     res.status(200).send(responseBody);
   } else {
     res.status(200).json(responseBody);
-  }
-
-  // Process asynchronously
-  if (msg) {
-    setImmediate(() => {
-      try {
-        processMessage(msg);
-      } catch (err) {
-        console.error('Webhook POST processing error:', err.message);
-      }
-    });
   }
 });
 
@@ -224,6 +238,28 @@ router.get('/', (req, res) => {
     return res.status(200).json({ status: 'ok' });
   }
 
+  try {
+    enqueueMessage(msg, { transport: 'webhook-get', remoteAddr: req.ip });
+  } catch (err) {
+    logger.error('webhook', 'Message was not accepted by the persistent queue', {
+      error: err.message, devId: msg.devId, method: 'GET'
+    });
+    recordInterfaceLog({
+      dev_id: msg.devId,
+      protocol: 'webhook',
+      direction: 'in',
+      endpoint: '/api/webhook',
+      method: 'GET',
+      status: 'failed',
+      request_summary: `type=${msg.type || ''} devId=${msg.devId || ''}`,
+      response_summary: `queue rejected: ${err.message}`,
+      request_raw: req.query,
+      response_raw: { status: 'retry' },
+      remote_addr: req.ip
+    });
+    return res.status(503).json({ status: 'retry' });
+  }
+
   recordInterfaceLog({
     dev_id: msg.devId,
     protocol: 'webhook',
@@ -244,15 +280,6 @@ router.get('/', (req, res) => {
   } else {
     res.status(200).json(responseBody);
   }
-
-  // Process asynchronously
-  setImmediate(() => {
-    try {
-      processMessage(msg);
-    } catch (err) {
-      console.error('Webhook GET processing error:', err.message);
-    }
-  });
 });
 
 module.exports = router;

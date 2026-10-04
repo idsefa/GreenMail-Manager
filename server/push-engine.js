@@ -58,7 +58,14 @@ function renderTemplate(template, vars) {
       time: vars.received_at
     });
   }
-  let result = template;
+  let result = String(template)
+    // Update the original built-in presets without changing arbitrary custom titles.
+    .replace('"title":"{{device_label}}"', '"title":"{{notification_title}}"')
+    .replace('title={{device_label}}&desp=', 'title={{notification_title}}&desp=')
+    .replaceAll(
+      '[{{device_label}}] {{event_label}}\\n',
+      '{{notification_title}} · {{event_label}}\\n{{device_label}}\\n'
+    );
   for (const [key, val] of Object.entries(vars)) {
     result = result.replaceAll('{{' + key + '}}', String(val == null ? '' : val));
   }
@@ -112,6 +119,14 @@ function getEventLabel(type) {
   };
 
   return labels[typeNum] || `Type ${type}`;
+}
+
+function getNotificationTitle(type) {
+  const typeNum = Number(type);
+  if ([501, 502, 503].includes(typeNum)) return '短信';
+  if ([601, 602, 603].includes(typeNum)) return '来电';
+  if ([620, 621, 622, 623].includes(typeNum)) return '通话';
+  return getEventLabel(type);
 }
 
 function getDeviceName(devId) {
@@ -335,12 +350,14 @@ function processPushRules(message) {
     const device_name = getDeviceName(dev_id);
     const device_label = getDeviceLabel(dev_id, device_name);
     const event_label = getEventLabel(type);
+    const notification_title = getNotificationTitle(type);
 
     const vars = {
       dev_id,
       device_name,
       device_label,
       event_label,
+      notification_title,
       type,
       slot,
       phone,
@@ -359,4 +376,11 @@ function processPushRules(message) {
   }
 }
 
-module.exports = { processPushRules, getMatchingRules, renderTemplate, buildPushRequest, formatFetchError };
+module.exports = {
+  processPushRules,
+  getMatchingRules,
+  renderTemplate,
+  buildPushRequest,
+  formatFetchError,
+  getNotificationTitle
+};

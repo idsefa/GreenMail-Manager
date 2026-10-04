@@ -131,7 +131,7 @@ router.get('/stats', (req, res) => {
     const recentMessages = db.prepare(`
       SELECT m.*, d.name as device_name FROM messages m
       LEFT JOIN devices d ON m.dev_id = d.dev_id
-      ORDER BY m.received_at DESC LIMIT 20
+      ORDER BY m.received_at DESC LIMIT 10
     `).all();
 
     res.json({

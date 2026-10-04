@@ -63,6 +63,17 @@ export const api = {
     return request(`/interface-logs${qs ? '?' + qs : ''}`, { method: 'DELETE' });
   },
 
+  // System Logs and Inbound Queue
+  getSystemLogs: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/system-logs${qs ? '?' + qs : ''}`);
+  },
+  getQueueStatus: () => request('/system-logs/queue'),
+  clearSystemLogs: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/system-logs${qs ? '?' + qs : ''}`, { method: 'DELETE' });
+  },
+
   // Batch Operations
   batchExecute: (devIds, cmd, params = {}) =>
     request('/batch/execute', { method: 'POST', body: { dev_ids: devIds, cmd, params } }),

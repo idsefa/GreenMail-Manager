@@ -3,6 +3,7 @@ const http = require('http');
 const db = require('../db');
 const { calcAdminToken, now, isDeviceOnline } = require('../utils');
 const { recordInterfaceLog } = require('../interface-log');
+const { storeMessage } = require('../message-store');
 
 const router = express.Router();
 
@@ -13,7 +14,7 @@ const router = express.Router();
 router.post('/:devId/send', async (req, res) => {
   try {
     const { devId } = req.params;
-    const { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, tid } = req.body;
+    const { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, tid } = req.body;
 
     if (!cmd) {
       return res.status(400).json({ error: 'Missing cmd parameter' });
@@ -45,6 +46,9 @@ router.post('/:devId/send', async (req, res) => {
     if (p9 !== undefined) params.set('p9', p9);
     if (p10 !== undefined) params.set('p10', p10);
     if (p11 !== undefined) params.set('p11', p11);
+    if (p12 !== undefined) params.set('p12', p12);
+    if (p13 !== undefined) params.set('p13', p13);
+    if (p14 !== undefined) params.set('p14', p14);
     if (tid) params.set('tid', tid);
 
     const url = `http://${device.wifi_ip}/ctrl?${params.toString()}`;
@@ -60,7 +64,7 @@ router.post('/:devId/send', async (req, res) => {
       status: 'ok',
       request_summary: `cmd=${cmd}${p1 !== undefined ? ` p1=${p1}` : ''}${p2 !== undefined ? ` p2=${p2}` : ''}`,
       response_summary: `code=${result.code ?? ''}`,
-      request_raw: { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, tid },
+      request_raw: { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, tid },
       response_raw: result,
       remote_addr: device.wifi_ip
     });
@@ -72,16 +76,18 @@ router.post('/:devId/send', async (req, res) => {
 
     // Store command result as a message
     try {
-      db.prepare(`
-        INSERT INTO messages (dev_id, type, slot, phone, content, raw_json, received_at, msg_ts)
-        VALUES (?, 999, 0, '', ?, ?, ?, ?)
-      `).run(
+      storeMessage({
         devId,
-        JSON.stringify(result),
-        JSON.stringify({ ...result, _cmd: cmd, _direction: 'response' }),
-        now(),
-        now()
-      );
+        type: 999,
+        slot: 0,
+        phone: '',
+        content: JSON.stringify(result),
+        rawJson: JSON.stringify({ ...result, _cmd: cmd, _direction: 'response' }),
+        receivedAt: ts,
+        msgTs: ts,
+        dedupeKey: `command:${devId}:${cmd}:${Date.now()}`,
+        message: { ...result, _cmd: cmd, _direction: 'response' }
+      });
     } catch (e) {
       console.error('Error storing command result:', e.message);
     }
@@ -132,12 +138,12 @@ router.post('/:devId/quick/:cmd', async (req, res) => {
     const result = await httpGet(url, 15000);
 
     // If stat command succeeded, update device info and mark as online
-    if (cmd === 'stat' && result && result.code === 0) {
+    if (cmd === 'stat' && isSuccessfulDeviceResponse(result)) {
       const ts = now();
       db.prepare(`
         UPDATE devices SET
           hw_ver = COALESCE(NULLIF(?, ''), hw_ver),
-          wifi_ip = COALESCE(NULLIF(?, ''), wifi_ip),
+          wifi_ip = COALESCE(NULLIF(NULLIF(?, ''), '0.0.0.0'), wifi_ip),
           wifi_ssid = COALESCE(NULLIF(?, ''), wifi_ssid),
           wifi_dbm = CASE WHEN ? > 0 THEN ? ELSE wifi_dbm END,
           ping_intvl = CASE WHEN ? > 0 THEN ? ELSE ping_intvl END,
@@ -178,7 +184,7 @@ router.post('/:devId/quick/:cmd', async (req, res) => {
     }
 
     // If ping command succeeded, mark device as online
-    if (cmd === 'ping' && result && result.code === 0) {
+    if (cmd === 'ping' && isSuccessfulDeviceResponse(result)) {
       const ts = now();
       db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
         .run(ts, ts, devId);
@@ -246,6 +252,11 @@ function httpGet(url, timeout = 10000) {
       reject(new Error('Request timeout'));
     });
   });
+}
+
+function isSuccessfulDeviceResponse(result) {
+  const code = result?.code;
+  return code === 0 || (typeof code === 'string' && code.trim() === '0');
 }
 
 module.exports = router;

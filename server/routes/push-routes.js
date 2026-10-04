@@ -119,6 +119,7 @@ router.post('/:id/test', async (req, res) => {
       device_name: '测试设备',
       device_label: '测试设备 (test-device)',
       event_label: '新短信',
+      notification_title: '短信',
       type: 501,
       slot: 1,
       phone: '+1234567890',

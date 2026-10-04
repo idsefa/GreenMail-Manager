@@ -12,10 +12,13 @@ const messagesRouter = require('./routes/messages');
 const commandsRouter = require('./routes/commands');
 const pushRulesRouter = require('./routes/push-routes');
 const interfaceLogsRouter = require('./routes/interface-logs');
+const systemLogsRouter = require('./routes/system-logs');
 const batchRouter = require('./routes/batch');
 const deviceOpsRouter = require('./routes/device-ops');
 const { createTcpServer } = require('./tcp-server');
 const { initWebSocket, broadcast } = require('./ws');
+const { startMessageQueue, stopMessageQueue, cleanupDeadLetters, getQueueStats } = require('./message-queue');
+const logger = require('./logger');
 
 const app = express();
 const HTTP_PORT = parseInt(process.env.PORT || '3000');
@@ -30,7 +33,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: now() });
+  res.json({ status: 'ok', time: now(), queue: getQueueStats() });
 });
 
 // API Routes
@@ -40,6 +43,7 @@ app.use('/api/messages', messagesRouter);
 app.use('/api/commands', commandsRouter);
 app.use('/api/push-rules', pushRulesRouter);
 app.use('/api/interface-logs', interfaceLogsRouter);
+app.use('/api/system-logs', systemLogsRouter);
 app.use('/api/batch', batchRouter);
 app.use('/api/devices', deviceOpsRouter);
 
@@ -51,6 +55,24 @@ app.use(express.static(staticDir));
 app.get('*', (req, res) => {
   res.sendFile(path.join(staticDir, 'index.html'));
 });
+
+const RETENTION_DAYS = Math.max(1, Number(process.env.LOG_RETENTION_DAYS || 30));
+
+function runMaintenance() {
+  try {
+    const application = logger.cleanupLogs();
+    const interfaceLogs = db.prepare('DELETE FROM interface_logs WHERE created_at < ?').run(now() - RETENTION_DAYS * 86400).changes;
+    const deadLetters = cleanupDeadLetters(process.env.DEAD_LETTER_RETENTION_DAYS || RETENTION_DAYS);
+    if (application || interfaceLogs || deadLetters) {
+      logger.info('maintenance', 'Expired operational records removed', { application, interfaceLogs, deadLetters });
+    }
+  } catch (err) {
+    logger.error('maintenance', 'Retention cleanup failed', { error: err.message });
+  }
+}
+
+runMaintenance();
+setInterval(runMaintenance, 86400000).unref();
 
 // Background task: Check device online status every 30 seconds
 function checkOnlineStatus() {
@@ -72,7 +94,7 @@ function checkOnlineStatus() {
     const onlineCount = devices.filter(d => d.is_online).length;
     broadcast('device_stats', { totalDevices, onlineCount });
   } catch (err) {
-    console.error('Error checking online status:', err.message);
+    logger.error('monitor', 'Online status check failed', { error: err.message });
   }
 }
 
@@ -143,7 +165,7 @@ async function pollDevicesPing() {
       }
     }
   } catch (err) {
-    console.error('Error polling device ping:', err.message);
+    logger.error('monitor', 'Device ping polling failed', { error: err.message });
   } finally {
     pollingInProgress = false;
   }
@@ -154,9 +176,11 @@ setInterval(() => {
 }, PING_POLL_INTERVAL);
 
 // Start servers
+startMessageQueue();
+
 const httpServer = app.listen(HTTP_PORT, () => {
-  console.log(`HTTP server listening on port ${HTTP_PORT}`);
-  console.log(`Web UI: http://localhost:${HTTP_PORT}`);
+  logger.info('server', 'HTTP server listening', { port: HTTP_PORT });
+  logger.info('server', 'Web UI available', { url: `http://localhost:${HTTP_PORT}` });
 });
 
 // Attach WebSocket to HTTP server
@@ -165,15 +189,27 @@ initWebSocket(httpServer);
 const tcpServer = createTcpServer(TCP_PORT);
 
 // Graceful shutdown
+let shutdownStarted = false;
 function shutdown(signal) {
-  console.log(`\n${signal} received, shutting down...`);
-  httpServer.close(() => console.log('HTTP server closed'));
-  tcpServer.close(() => console.log('TCP server closed'));
-  db.close();
-  process.exit(0);
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  logger.info('server', 'Shutdown started', { signal });
+  stopMessageQueue();
+  let remaining = 2;
+  const finish = () => {
+    remaining -= 1;
+    if (remaining === 0) {
+      logger.info('server', 'Shutdown completed');
+      db.close();
+      process.exit(0);
+    }
+  };
+  httpServer.close(finish);
+  tcpServer.close(finish);
+  setTimeout(() => process.exit(1), 10000).unref();
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-console.log('GreenMail Manager started successfully');
+logger.info('server', 'GreenMail Manager started successfully');

@@ -10,6 +10,7 @@ export default function Layout({ children }) {
     { path: '/devices', label: t('nav.devices'), icon: 'V' },
     { path: '/messages', label: t('nav.messages'), icon: 'M' },
     { path: '/interface-logs', label: t('nav.interfaceLogs'), icon: 'L' },
+    { path: '/system-logs', label: lang === 'zh' ? '系统日志' : 'System Logs', icon: '!' },
     { path: '/sms', label: t('nav.sms'), icon: 'S' },
     { path: '/calls', label: t('nav.calls'), icon: 'C' },
     { path: '/push-rules', label: t('nav.pushRules'), icon: 'P' },

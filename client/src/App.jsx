@@ -5,6 +5,7 @@ import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
 import Messages from './pages/Messages';
 import InterfaceLogs from './pages/InterfaceLogs';
+import SystemLogs from './pages/SystemLogs';
 import SMS from './pages/SMS';
 import Calls from './pages/Calls';
 import PushRules from './pages/PushRules';
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="/devices/:devId" element={<DeviceDetail />} />
         <Route path="/messages" element={<Messages />} />
         <Route path="/interface-logs" element={<InterfaceLogs />} />
+        <Route path="/system-logs" element={<SystemLogs />} />
         <Route path="/sms" element={<SMS />} />
         <Route path="/calls" element={<Calls />} />
         <Route path="/push-rules" element={<PushRules />} />

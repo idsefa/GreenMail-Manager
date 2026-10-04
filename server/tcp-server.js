@@ -1,9 +1,11 @@
 const net = require('net');
-const { processMessage } = require('./message-handler');
 const { now } = require('./utils');
 const { recordInterfaceLog } = require('./interface-log');
+const { enqueueMessage } = require('./message-queue');
+const logger = require('./logger');
 
 const DELIMITER = Buffer.from([0x11, 0x12]);
+const MAX_TCP_BUFFER_BYTES = Math.max(1024, Number(process.env.TCP_MAX_BUFFER_BYTES || 1024 * 1024));
 
 function createTcpServer(port = 3888) {
   const server = net.createServer((socket) => {
@@ -12,6 +14,13 @@ function createTcpServer(port = 3888) {
 
     socket.on('data', (data) => {
       buffer = Buffer.concat([buffer, data]);
+      if (buffer.length > MAX_TCP_BUFFER_BYTES) {
+        logger.error('tcp', 'TCP frame buffer limit exceeded', {
+          remoteAddr, bytes: buffer.length, limit: MAX_TCP_BUFFER_BYTES
+        });
+        socket.destroy();
+        return;
+      }
 
       // Split messages on 0x11 0x12 delimiter
       let pos;
@@ -24,6 +33,21 @@ function createTcpServer(port = 3888) {
         try {
           const jsonStr = messageBuf.toString('utf8');
           const msg = JSON.parse(jsonStr);
+
+          try {
+            enqueueMessage(msg, { transport: 'tcp', remoteAddr });
+          } catch (err) {
+            recordInterfaceLog({
+              dev_id: msg.devId || '', protocol: 'tcp', direction: 'in', endpoint: `tcp:${port}`,
+              method: 'SEND', status: 'failed', request_summary: `type=${msg.type || ''} devId=${msg.devId || ''}`,
+              response_summary: `queue rejected: ${err.message}`, request_raw: msg, response_raw: '', remote_addr: remoteAddr
+            });
+            logger.error('tcp', 'Message was not accepted by the persistent queue', {
+              error: err.message, remoteAddr, devId: msg.devId || ''
+            });
+            socket.destroy();
+            break;
+          }
 
           // Check if this is message type 100 (first WiFi connected) - respond with time sync
           if (Number(msg.type) === 100) {
@@ -80,18 +104,19 @@ function createTcpServer(port = 3888) {
               remote_addr: remoteAddr
             });
           }
-
-          // Process message asynchronously
-          setImmediate(() => processMessage(msg));
         } catch (err) {
-          console.error(`TCP parse error from ${remoteAddr}:`, err.message);
+          logger.warn('tcp', 'TCP frame was not valid JSON', {
+            remoteAddr, error: err.message
+          });
         }
       }
     });
 
     socket.on('error', (err) => {
       if (err.code !== 'ECONNRESET') {
-        console.error(`TCP socket error from ${remoteAddr}:`, err.message);
+        logger.warn('tcp', 'TCP socket error', {
+          remoteAddr, error: err.message, code: err.code
+        });
       }
     });
 
@@ -101,11 +126,11 @@ function createTcpServer(port = 3888) {
   });
 
   server.on('error', (err) => {
-    console.error('TCP server error:', err.message);
+    logger.error('tcp', 'TCP server error', { error: err.message, code: err.code });
   });
 
   server.listen(port, () => {
-    console.log(`TCP server listening on port ${port}`);
+    logger.info('tcp', 'TCP server listening', { port });
   });
 
   return server;

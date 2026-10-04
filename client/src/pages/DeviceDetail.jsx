@@ -44,6 +44,21 @@ function parseSmsStorageEnabled(val) {
   return states.some(s => s === 'on' || s === '1' || s === 'true');
 }
 
+function getDeviceResponseCode(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function getCommandError(command, payload) {
+  const code = payload?.code ?? 'unknown';
+  const note = payload?.note || payload?.msg || 'No error details returned';
+  return `${command} failed (code ${code}): ${note}`;
+}
+
 export default function DeviceDetail() {
   const { devId } = useParams();
   const [device, setDevice] = useState(null);
@@ -64,6 +79,10 @@ export default function DeviceDetail() {
   const [delSsid, setDelSsid] = useState('');
   const [savedWifi, setSavedWifi] = useState([]);
   const [wifiStoreLoading, setWifiStoreLoading] = useState(false);
+  const [wifiStoreError, setWifiStoreError] = useState('');
+  const [simCardInfo, setSimCardInfo] = useState({});
+  const [simCardLoading, setSimCardLoading] = useState({});
+  const [statusRefreshing, setStatusRefreshing] = useState(false);
   // OTA state
   const [otaDelay, setOtaDelay] = useState(10);
   // SMS Management state
@@ -85,6 +104,7 @@ export default function DeviceDetail() {
     loadDevice();
     loadMessages();
     querySmsStorageStatus();
+    loadSavedWifi();
     pingDeviceOnce();
 
     const unsub = subscribe((msg) => {
@@ -137,7 +157,7 @@ export default function DeviceDetail() {
 
   async function loadMessages() {
     try {
-      const data = await api.getMessages({ dev_id: devId, limit: 50 });
+      const data = await api.getMessages({ dev_id: devId, limit: 10 });
       setMessages(data.messages || []);
     } catch (err) {
       console.error('Failed to load messages:', err);
@@ -160,6 +180,23 @@ export default function DeviceDetail() {
       await Promise.all([loadDevice(), loadMessages()]);
     } finally {
       autoRefreshBusyRef.current = false;
+    }
+  }
+
+  async function refreshDeviceStatus() {
+    if (statusRefreshing) return;
+    setStatusRefreshing(true);
+    try {
+      const data = await api.quickCommand(devId, 'stat');
+      const payload = data?.result || data;
+      if (getDeviceResponseCode(payload?.code) !== 0) {
+        throw new Error(getCommandError('stat', payload));
+      }
+      await Promise.all([loadDevice(), loadMessages()]);
+    } catch (err) {
+      setCmdResult({ error: err.message });
+    } finally {
+      setStatusRefreshing(false);
     }
   }
 
@@ -193,10 +230,13 @@ export default function DeviceDetail() {
       setCmdResult(res);
       loadDevice();
       loadMessages();
+      return res;
     } catch (err) {
       setCmdResult({ error: err.message });
+      return null;
+    } finally {
+      setCmdLoading(false);
     }
-    setCmdLoading(false);
   }
 
   function handleWifiOff() {
@@ -205,18 +245,26 @@ export default function DeviceDetail() {
     }
   }
 
-  function handleAddWifi() {
+  async function handleAddWifi() {
     if (!addSsid) return;
-    sendCmd('addwf', { p1: addSsid, p2: addPassword });
-    setAddSsid('');
-    setAddPassword('');
+    const result = await sendCmd('addwf', { p1: addSsid, p2: addPassword });
+    const payload = result?.result || result;
+    if (getDeviceResponseCode(payload?.code) === 0) {
+      setAddSsid('');
+      setAddPassword('');
+      await loadSavedWifi();
+    }
   }
 
-  function handleDelWifi() {
+  async function handleDelWifi() {
     if (!delSsid) return;
     if (confirm(t('deviceDetail.deleteWiFiConfirm', { ssid: delSsid }))) {
-      sendCmd('delwf', { p1: delSsid });
-      setDelSsid('');
+      const result = await sendCmd('delwf', { p1: delSsid });
+      const payload = result?.result || result;
+      if (getDeviceResponseCode(payload?.code) === 0) {
+        setDelSsid('');
+        await loadSavedWifi();
+      }
     }
   }
 
@@ -256,8 +304,8 @@ export default function DeviceDetail() {
       const enabled = parseSmsStorageEnabled(payload?.val);
       setSmsStorageStatus(enabled === null ? 'unknown' : (enabled ? 'on' : 'off'));
       setSmsResult({
-        error: payload?.code === 0 ? null : (payload?.note || 'Failed to enable SMS storage'),
-        note: payload?.code === 0
+        error: getDeviceResponseCode(payload?.code) === 0 ? null : (payload?.note || 'Failed to enable SMS storage'),
+        note: getDeviceResponseCode(payload?.code) === 0
           ? `SMS storage enabled (${payload?.val || ''}). Restart device to apply.`
           : payload?.note
       });
@@ -277,8 +325,8 @@ export default function DeviceDetail() {
       const enabled = parseSmsStorageEnabled(payload?.val);
       setSmsStorageStatus(enabled === null ? 'unknown' : (enabled ? 'on' : 'off'));
       setSmsResult({
-        error: payload?.code === 0 ? null : (payload?.note || 'Failed to disable SMS storage'),
-        note: payload?.code === 0
+        error: getDeviceResponseCode(payload?.code) === 0 ? null : (payload?.note || 'Failed to disable SMS storage'),
+        note: getDeviceResponseCode(payload?.code) === 0
           ? `SMS storage disabled (${payload?.val || ''}). Restart device to apply.`
           : payload?.note
       });
@@ -295,7 +343,7 @@ export default function DeviceDetail() {
       const payload = data?.result || data;
       const enabled = parseSmsStorageEnabled(payload?.val);
       setSmsStorageStatus(enabled === null ? 'unknown' : (enabled ? 'on' : 'off'));
-      if (payload?.code === 0) {
+      if (getDeviceResponseCode(payload?.code) === 0) {
         setSmsResult({ note: `Current SMS storage: ${payload?.val || 'unknown'}` });
       }
     } catch {
@@ -303,24 +351,59 @@ export default function DeviceDetail() {
     }
   }
 
-  async function handleLoadSavedWifi() {
+  async function loadSavedWifi() {
     setWifiStoreLoading(true);
+    setWifiStoreError('');
     try {
       const data = await api.sendCommand(devId, 'askwfstore');
       const payload = data?.result || data;
-      let parsed = [];
+      if (getDeviceResponseCode(payload?.code) !== 0) {
+        throw new Error(getCommandError('askwfstore', payload));
+      }
+
+      let parsed;
       try {
         parsed = JSON.parse(payload?.val || '[]');
       } catch {
-        parsed = [];
+        throw new Error('askwfstore returned an invalid WiFi list');
       }
-      setSavedWifi(Array.isArray(parsed) ? parsed : []);
-      setCmdResult(data);
+      if (!Array.isArray(parsed)) {
+        throw new Error('askwfstore returned an invalid WiFi list');
+      }
+
+      const saved = parsed
+        .filter(item => item && typeof item === 'object' && String(item.ssid || '').trim())
+        .map(item => ({ ssid: String(item.ssid).trim(), pwd: String(item.pwd || '') }));
+      setSavedWifi(saved);
+      setDelSsid(current => saved.some(item => item.ssid === current) ? current : '');
+    } catch (err) {
+      setWifiStoreError(err.message);
+      setSavedWifi([]);
+      setDelSsid('');
+    } finally {
+      setWifiStoreLoading(false);
+    }
+  }
+
+  function handleLoadSavedWifi() {
+    loadSavedWifi();
+  }
+
+  async function handleReadCard(slot) {
+    setSimCardLoading(previous => ({ ...previous, [slot]: true }));
+    try {
+      const data = await api.sendCommand(devId, 'readcard', { p1: slot });
+      const payload = data?.result || data;
+      if (getDeviceResponseCode(payload?.code) !== 0) {
+        throw new Error(getCommandError('readcard', payload));
+      }
+      setSimCardInfo(previous => ({ ...previous, [slot]: payload }));
+      loadDevice();
     } catch (err) {
       setCmdResult({ error: err.message });
-      setSavedWifi([]);
+    } finally {
+      setSimCardLoading(previous => ({ ...previous, [slot]: false }));
     }
-    setWifiStoreLoading(false);
   }
 
   async function handleSyncSms() {
@@ -341,6 +424,7 @@ export default function DeviceDetail() {
   if (!device) return <div className="text-red-500">{t('deviceDetail.deviceNotFound')}</div>;
 
   const callActive = isActiveCall(messages);
+  const deletableWifi = savedWifi.filter(item => item.ssid.toLowerCase() !== 'lzwifi');
 
   return (
     <div>
@@ -401,10 +485,11 @@ export default function DeviceDetail() {
                 ))}
               </select>
               <button
-                onClick={refreshOverview}
-                className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 hover:bg-gray-300"
+                onClick={refreshDeviceStatus}
+                disabled={statusRefreshing || !device.wifi_ip}
+                className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50"
               >
-                {t('deviceDetail.refreshNow')}
+                {statusRefreshing ? 'Refreshing status...' : t('deviceDetail.refreshNow')}
               </button>
             </div>
           </div>
@@ -513,9 +598,14 @@ export default function DeviceDetail() {
             </button>
             <button onClick={handleLoadSavedWifi} disabled={cmdLoading || wifiStoreLoading}
               className="px-3 py-1.5 text-sm rounded font-medium bg-gray-700 text-white hover:bg-gray-800 disabled:opacity-50">
-              {wifiStoreLoading ? 'Loading WiFi...' : 'Saved WiFi'}
+              {wifiStoreLoading ? 'Loading WiFi...' : 'Refresh Saved WiFi'}
             </button>
           </div>
+          {wifiStoreError && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 p-2 rounded">
+              {wifiStoreError}
+            </div>
+          )}
           {savedWifi.length > 0 && (
             <div className="border rounded p-3 bg-gray-50">
               <h4 className="text-sm font-medium text-gray-700 mb-2">Saved WiFi List</h4>
@@ -529,8 +619,8 @@ export default function DeviceDetail() {
               </div>
             </div>
           )}
-          {savedWifi.length === 0 && !wifiStoreLoading && (
-            <div className="text-xs text-gray-500">No saved WiFi loaded yet. Click "Saved WiFi" to query device.</div>
+          {savedWifi.length === 0 && !wifiStoreLoading && !wifiStoreError && (
+            <div className="text-xs text-gray-500">No saved WiFi networks are configured on this device.</div>
           )}
           <div className="border-t pt-4">
             <h4 className="text-sm font-medium text-gray-600 mb-2">{t('deviceDetail.addWiFiNetwork')}</h4>
@@ -556,8 +646,14 @@ export default function DeviceDetail() {
             <div className="flex flex-wrap gap-2 items-end">
               <div className="flex-1">
                 <label className="text-xs text-gray-500">{t('deviceDetail.ssidLabel')}</label>
-                <input type="text" value={delSsid} onChange={e => setDelSsid(e.target.value)}
-                  placeholder={t('deviceDetail.deleteSSIDPlaceholder')} className="block border rounded px-2 py-1 text-sm w-full max-w-xs" />
+                <select value={delSsid} onChange={e => setDelSsid(e.target.value)}
+                  disabled={wifiStoreLoading || deletableWifi.length === 0}
+                  className="block border rounded px-2 py-1 text-sm w-full max-w-xs disabled:opacity-50">
+                  <option value="">{deletableWifi.length ? 'Select a saved WiFi network' : 'No deletable WiFi networks'}</option>
+                  {deletableWifi.map(item => (
+                    <option key={item.ssid} value={item.ssid}>{item.ssid}</option>
+                  ))}
+                </select>
               </div>
               <button onClick={handleDelWifi} disabled={cmdLoading || !delSsid}
                 className="px-3 py-1.5 text-sm rounded font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
@@ -621,6 +717,24 @@ export default function DeviceDetail() {
                       {t('deviceDetail.netOFF')}
                     </button>
                   </div>
+                </div>
+                <div className="border-t pt-3">
+                  <button onClick={() => handleReadCard(slot)} disabled={cmdLoading || simCardLoading[slot]}
+                    className="px-3 py-1 text-xs rounded font-medium bg-gray-700 text-white hover:bg-gray-800 disabled:opacity-50">
+                    {simCardLoading[slot] ? 'Reading SIM...' : 'Read SIM Info'}
+                  </button>
+                  {simCardInfo[slot] && (
+                    <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-600">
+                      <div>Phone: {simCardInfo[slot].msIsdn || '-'}</div>
+                      <div>Name: {simCardInfo[slot].scName || '-'}</div>
+                      <div>Network: {simCardInfo[slot].simNet ? 'ON' : 'OFF'}</div>
+                      <div>Data: {Math.round(Number(simCardInfo[slot].trafficConsumedKB || 0) / 1024)} MB / {simCardInfo[slot].trafficTotalMB ?? 0} MB</div>
+                      <div className="col-span-2 font-mono break-all">ICCID: {simCardInfo[slot].iccId || '-'}</div>
+                      <div className="col-span-2 font-mono break-all">IMSI: {simCardInfo[slot].imsi || '-'}</div>
+                      <div>Incoming: {simCardInfo[slot].callInCount ?? 0} / {simCardInfo[slot].callInMinutes ?? 0} min</div>
+                      <div>Outgoing: {simCardInfo[slot].callOutCount ?? 0} / {simCardInfo[slot].callOutMinutes ?? 0} min</div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

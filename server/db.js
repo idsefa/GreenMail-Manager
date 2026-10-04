@@ -53,7 +53,8 @@ db.exec(`
     content TEXT DEFAULT '',
     raw_json TEXT NOT NULL,
     received_at INTEGER DEFAULT (strftime('%s','now')),
-    msg_ts INTEGER DEFAULT 0
+    msg_ts INTEGER DEFAULT 0,
+    dedupe_key TEXT DEFAULT ''
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_dev_id ON messages(dev_id);
@@ -61,6 +62,48 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone);
   CREATE INDEX IF NOT EXISTS idx_messages_received_at ON messages(received_at);
   CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
+
+
+  CREATE TABLE IF NOT EXISTS message_dedup (
+    dedupe_key TEXT PRIMARY KEY,
+    dev_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    duplicate_count INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_message_dedup_dev_id ON message_dedup(dev_id);
+
+  CREATE TABLE IF NOT EXISTS inbound_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dev_id TEXT DEFAULT '',
+    transport TEXT NOT NULL DEFAULT '',
+    remote_addr TEXT DEFAULT '',
+    payload TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    available_at INTEGER NOT NULL,
+    last_error TEXT DEFAULT ''
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_inbound_queue_ready
+    ON inbound_queue(status, available_at, id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_queue_dev_id ON inbound_queue(dev_id);
+
+  CREATE TABLE IF NOT EXISTS application_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    message TEXT NOT NULL,
+    context TEXT DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_application_logs_created_at ON application_logs(created_at);
+  CREATE INDEX IF NOT EXISTS idx_application_logs_level ON application_logs(level);
+  CREATE INDEX IF NOT EXISTS idx_application_logs_scope ON application_logs(scope);
 
   CREATE TABLE IF NOT EXISTS push_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,5 +158,30 @@ const pushRuleColumns = db.prepare("PRAGMA table_info(push_rules)").all().map((c
 if (!pushRuleColumns.includes('trigger_msisdn')) {
   db.exec("ALTER TABLE push_rules ADD COLUMN trigger_msisdn TEXT DEFAULT ''");
 }
+
+const messageColumns = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
+if (!messageColumns.includes('dedupe_key')) {
+  db.exec("ALTER TABLE messages ADD COLUMN dedupe_key TEXT DEFAULT ''");
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_messages_dedupe_key ON messages(dedupe_key)');
+
+// Keep the oldest copy of historical SMS records before enforcing the identity
+// constraint. It protects both synced and pushed SMS from being stored twice.
+db.exec(`
+  DELETE FROM messages
+  WHERE type IN (501, 502)
+    AND msg_ts > 0
+    AND id NOT IN (
+      SELECT MIN(id)
+      FROM messages
+      WHERE type IN (501, 502) AND msg_ts > 0
+      GROUP BY dev_id, type, slot, phone, msg_ts
+    )
+`);
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_sms_identity
+  ON messages(dev_id, type, slot, phone, msg_ts)
+  WHERE type IN (501, 502) AND msg_ts > 0
+`);
 
 module.exports = db;

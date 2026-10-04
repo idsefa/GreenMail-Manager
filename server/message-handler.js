@@ -2,6 +2,8 @@ const db = require('./db');
 const { now } = require('./utils');
 const { broadcast } = require('./ws');
 const { processPushRules } = require('./push-engine');
+const { storeMessage } = require('./message-store');
+const logger = require('./logger');
 
 // Prepared statements for performance
 const upsertDevice = db.prepare(`
@@ -35,15 +37,14 @@ const updatePing = db.prepare(`
   UPDATE devices SET last_ping_at = @ts, is_online = 1, updated_at = @ts WHERE dev_id = @devId
 `);
 
-const insertMessage = db.prepare(`
-  INSERT INTO messages (dev_id, type, slot, phone, content, raw_json, received_at, msg_ts)
-  VALUES (@devId, @type, @slot, @phone, @content, @rawJson, @receivedAt, @msgTs)
-`);
+function isSuccessfulDeviceCode(code) {
+  return code === 0 || (typeof code === 'string' && code.trim() === '0');
+}
 
 const updateDeviceFromStat = db.prepare(`
   UPDATE devices SET
     hw_ver = COALESCE(NULLIF(@hwVer, ''), hw_ver),
-    wifi_ip = COALESCE(NULLIF(@ip, ''), wifi_ip),
+    wifi_ip = COALESCE(NULLIF(NULLIF(@ip, ''), '0.0.0.0'), wifi_ip),
     wifi_ssid = COALESCE(NULLIF(@ssid, ''), wifi_ssid),
     wifi_dbm = CASE WHEN @dbm > 0 THEN @dbm ELSE wifi_dbm END,
     ping_intvl = CASE WHEN @pingIntvl > 0 THEN @pingIntvl ELSE ping_intvl END,
@@ -70,13 +71,19 @@ function processMessage(msg) {
   try {
     const devId = msg.devId;
     if (!devId) {
-      console.warn('Message missing devId:', JSON.stringify(msg).substring(0, 200));
-      return;
+      const err = new Error('Message missing devId');
+      err.permanent = true;
+      throw err;
     }
 
     const type = Number(msg.type);
+    if (!Number.isFinite(type)) {
+      const err = new Error('Message type is invalid');
+      err.permanent = true;
+      throw err;
+    }
     const ts = now();
-    const msgTs = Number(msg.msgTs || msg.ts || 0);
+    const msgTs = Number(msg.msgTs || msg.smsTs || msg.ts || 0);
 
     // Extract common fields
     const slot = Number(msg.slot || 0);
@@ -88,35 +95,36 @@ function processMessage(msg) {
       (slot === 2 ? (msg.sim2_msIsdn || msg.slotInfo?.sim2_msIsdn || '') : '')
     );
     const content = String(msg.smsBd || msg.content || msg.val || msg.note || '');
+    const rawJson = JSON.stringify(msg);
 
-    // Store message in database
-    const result = insertMessage.run({
+    // The storage transaction makes retries idempotent after a process restart.
+    const stored = storeMessage({
       devId,
       type,
       slot,
       phone,
       content,
-      rawJson: JSON.stringify(msg),
+      rawJson,
       receivedAt: ts,
-      msgTs
+      msgTs,
+      message: msg
     });
 
-    // Broadcast message via WebSocket
-    broadcast('message', { dev_id: devId, msg_type: type, slot, phone, content });
-
-    // Process push rules
-    const messageId = result.lastInsertRowid;
-    processPushRules({
-      id: messageId,
-      dev_id: devId,
-      type,
-      slot,
-      phone,
-      msIsdn,
-      content,
-      received_at: ts,
-      raw_json: JSON.stringify(msg)
-    });
+    // Do not repeat UI events or external pushes for a retransmitted message.
+    if (!stored.duplicate) {
+      broadcast('message', { dev_id: devId, msg_type: type, slot, phone, content });
+      processPushRules({
+        id: stored.id,
+        dev_id: devId,
+        type,
+        slot,
+        phone,
+        msIsdn,
+        content,
+        received_at: ts,
+        raw_json: rawJson
+      });
+    }
 
     // Extract SIM info
     const sim1_icc_id = msg.sim1_iccId || (msg.slot == 1 ? (msg.iccId || '') : '');
@@ -159,7 +167,7 @@ function processMessage(msg) {
         break;
 
       case 999: // Command result - also treat as stat update if contains status info
-        if (msg.code === 0 && msg.devId) {
+        if (isSuccessfulDeviceCode(msg.code) && msg.devId) {
           updateDeviceFromStat.run({
             devId,
             hwVer: msg.hwVer || '',
@@ -234,8 +242,15 @@ function processMessage(msg) {
         });
         break;
     }
+
+    return stored;
   } catch (err) {
-    console.error('Error processing message:', err.message, err.stack);
+    logger.error('message-handler', 'Message processing failed', {
+      error: err.message,
+      devId: msg?.devId || '',
+      type: msg?.type
+    });
+    throw err;
   }
 }
 

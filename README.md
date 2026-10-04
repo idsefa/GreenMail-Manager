@@ -24,6 +24,9 @@ GreenMail Manager 是一个面向 GreenMail 开发板的多设备管理平台，
 - 批量查询、批量重启、批量发短信
 - Bark / 钉钉 / 飞书 / 企业微信 / Telegram / Slack 等推送规则
 - 接口日志追踪，便于排查 `invalid payload`、推送失败、设备请求失败
+- 持久化入站消息队列，批量消费、失败重试和死信保留
+- 系统日志与队列健康状态 API：`/api/system-logs`、`/api/system-logs/queue`
+- 短信和重复上报自动去重，重复消息不会重复触发推送
 - SQLite 持久化存储
 
 ## 目录结构
@@ -535,6 +538,7 @@ POST /api/devices/:devId/sync-sms
 - `{{dev_id}}`
 - `{{device_name}}`
 - `{{device_label}}`
+- `{{notification_title}}`
 - `{{event_label}}`
 - `{{type}}`
 - `{{slot}}`
@@ -548,6 +552,7 @@ POST /api/devices/:devId/sync-sms
 
 - `{{device_name}}`：设备自定义名称
 - `{{device_label}}`：优先输出 `设备名 (SN)`，没有设备名时直接输出 `SN`
+- `{{notification_title}}`：通知标题。短信事件为“短信”，来电事件为“来电”
 - `{{event_label}}`：事件文案，例如：
   - `新短信`
   - `短信已发送`
@@ -571,8 +576,8 @@ POST /api/devices/:devId/sync-sms
 ```json
 {
   "device_key": "YOUR_KEY",
-  "title": "{{device_label}}",
-  "body": "{{event_label}}\n{{phone}}: {{content}}",
+  "title": "{{notification_title}}",
+  "body": "{{event_label}}\n{{device_label}}\n{{phone}}: {{content}}",
   "group": "GreenMail"
 }
 ```

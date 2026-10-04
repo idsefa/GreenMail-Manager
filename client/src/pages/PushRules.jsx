@@ -5,14 +5,14 @@ import { formatDeviceIdList } from '../utils/device-label';
 
 const PRESETS = {
   default: '',
-  dingtalk: '{"msgtype":"text","text":{"content":"[{{device_label}}] {{event_label}}\\n{{phone}}: {{content}}"}}',
-  feishu: '{"msg_type":"text","content":{"text":"[{{device_label}}] {{event_label}}\\n{{phone}}: {{content}}"}}',
-  bark: '{"device_key":"YOUR_KEY","title":"{{device_label}}","body":"{{event_label}}\\n{{phone}}: {{content}}","group":"GreenMail"}',
-  serverchan: 'title={{device_label}}&desp={{event_label}}%0A{{phone}}: {{content}}',
-  wecom: '{"msgtype":"text","text":{"content":"[{{device_label}}] {{event_label}}\\n{{phone}}: {{content}}"}}',
-  telegram: '{"chat_id":"CHAT_ID","text":"[{{device_label}}] {{event_label}}\\n{{phone}}: {{content}}"}',
-  slack: '{"text":"[{{device_label}}] {{event_label}}\\n{{phone}}: {{content}}"}',
-  custom: '{"dev_id":"{{dev_id}}","device_name":"{{device_name}}","device_label":"{{device_label}}","event_label":"{{event_label}}","type":{{type}},"phone":"{{phone}}","msIsdn":"{{msIsdn}}","content":"{{content}}","time":"{{received_at}}"}'
+  dingtalk: '{"msgtype":"text","text":{"content":"{{notification_title}} · {{event_label}}\\n{{device_label}}\\n{{phone}}: {{content}}"}}',
+  feishu: '{"msg_type":"text","content":{"text":"{{notification_title}} · {{event_label}}\\n{{device_label}}\\n{{phone}}: {{content}}"}}',
+  bark: '{"device_key":"YOUR_KEY","title":"{{notification_title}}","body":"{{event_label}}\\n{{device_label}}\\n{{phone}}: {{content}}","group":"GreenMail"}',
+  serverchan: 'title={{notification_title}}&desp={{event_label}}%0A{{device_label}}%0A{{phone}}: {{content}}',
+  wecom: '{"msgtype":"text","text":{"content":"{{notification_title}} · {{event_label}}\\n{{device_label}}\\n{{phone}}: {{content}}"}}',
+  telegram: '{"chat_id":"CHAT_ID","text":"{{notification_title}} · {{event_label}}\\n{{device_label}}\\n{{phone}}: {{content}}"}',
+  slack: '{"text":"{{notification_title}} · {{event_label}}\\n{{device_label}}\\n{{phone}}: {{content}}"}',
+  custom: '{"dev_id":"{{dev_id}}","device_name":"{{device_name}}","device_label":"{{device_label}}","notification_title":"{{notification_title}}","event_label":"{{event_label}}","type":{{type}},"phone":"{{phone}}","msIsdn":"{{msIsdn}}","content":"{{content}}","time":"{{received_at}}"}'
 };
 
 const PRESET_HINTS = {
@@ -322,7 +322,7 @@ function RuleForm({ rule, onClose }) {
         <textarea value={form.body_template} onChange={e => update('body_template', e.target.value)}
           className="w-full border rounded px-3 py-2 text-sm font-mono h-32" placeholder={t('pushRules.bodyTemplatePlaceholder')} />
         <div className="text-xs text-gray-400 mt-1">
-          {t('pushRules.templateVariables')}: {'{{dev_id}}'}, {'{{device_name}}'}, {'{{device_label}}'}, {'{{event_label}}'}, {'{{type}}'}, {'{{slot}}'}, {'{{phone}}'}, {'{{msIsdn}}'}, {'{{content}}'}, {'{{received_at}}'}, {'{{raw_json}}'}
+          {t('pushRules.templateVariables')}: {'{{dev_id}}'}, {'{{device_name}}'}, {'{{device_label}}'}, {'{{notification_title}}'}, {'{{event_label}}'}, {'{{type}}'}, {'{{slot}}'}, {'{{phone}}'}, {'{{msIsdn}}'}, {'{{content}}'}, {'{{received_at}}'}, {'{{raw_json}}'}
         </div>
       </div>
 

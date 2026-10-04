@@ -2,8 +2,14 @@ const express = require('express');
 const db = require('../db');
 const { calcAdminToken, now, isDeviceOnline } = require('../utils');
 const { recordInterfaceLog } = require('../interface-log');
+const { deleteDeviceMessageData } = require('../message-store');
 
 const router = express.Router();
+
+function isSuccessfulDeviceResponse(result) {
+  const code = result?.code;
+  return code === 0 || (typeof code === 'string' && code.trim() === '0');
+}
 
 // GET /api/devices - List all devices
 router.get('/', (req, res) => {
@@ -111,7 +117,7 @@ router.post('/', async (req, res) => {
           r.on('timeout', () => { r.destroy(); reject(new Error('Device unreachable')); });
         });
 
-        if (result.code !== 0 || !result.devId) {
+        if (!isSuccessfulDeviceResponse(result) || !result.devId) {
           return res.status(400).json({ error: 'Device responded but devId not found in stat response', detail: result });
         }
         devId = result.devId;
@@ -210,7 +216,7 @@ router.post('/', async (req, res) => {
 // DELETE /api/devices/:devId - Delete a device and its messages
 router.delete('/:devId', (req, res) => {
   try {
-    db.prepare('DELETE FROM messages WHERE dev_id = ?').run(req.params.devId);
+    deleteDeviceMessageData(req.params.devId);
     db.prepare('DELETE FROM devices WHERE dev_id = ?').run(req.params.devId);
     res.json({ status: 'ok' });
   } catch (err) {

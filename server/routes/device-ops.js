@@ -24,6 +24,15 @@ function httpGet(url, timeout = 15000) {
   });
 }
 
+function getDeviceResponseCode(code) {
+  if (typeof code === 'number') return Number.isFinite(code) ? code : null;
+  if (typeof code === 'string' && code.trim() !== '') {
+    const parsed = Number(code);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 /**
  * POST /api/devices/:devId/enable-sms-storage
  * Enable SMS storage on device via storesmsen command.
@@ -65,7 +74,7 @@ router.post('/:devId/enable-sms-storage', async (req, res) => {
     res.json({
       result,
       note: result.note || '',
-      requires_restart: result.code === 0
+      requires_restart: getDeviceResponseCode(result?.code) === 0
     });
   } catch (err) {
     console.error('Enable SMS storage error:', err.message);
@@ -114,30 +123,60 @@ router.post('/:devId/sync-sms', async (req, res) => {
     db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
       .run(ts, ts, devId);
 
-    // Paginate through all SMS records on device (max 50 per page)
+    // Some device firmware returns JSON null for a 50-record page. Start
+    // conservatively and shrink the page only when a response is empty.
     let allSms = [];
     let offset = 0;
-    const limit = 50;
+    let limit = 20;
     let hasMore = true;
 
     while (hasMore) {
-      let url = `http://${device.wifi_ip}/ctrl?token=${token}&cmd=querysms&p1=${offset}&p2=${limit}`;
-      if (slotFilter === 1 || slotFilter === 2) {
-        url += `&p4=${slotFilter}`;
+      let result = null;
+      let responseCode = null;
+      let pageLimit = limit;
+
+      for (const candidateLimit of new Set([limit, 10, 5, 1])) {
+        let url = `http://${device.wifi_ip}/ctrl?token=${token}&cmd=querysms&p1=${offset}&p2=${candidateLimit}`;
+        if (slotFilter === 1 || slotFilter === 2) {
+          url += `&p4=${slotFilter}`;
+        }
+
+        result = await httpGet(url, 15000);
+        responseCode = getDeviceResponseCode(result?.code);
+        pageLimit = candidateLimit;
+
+        // A real device error must be reported. Only a missing code is retried
+        // with a smaller page because that is a known firmware buffer failure.
+        if (responseCode !== null) break;
       }
 
-      const result = await httpGet(url, 15000);
-
-      if (result.code !== 0) {
-        return res.status(400).json({
-          error: 'Device returned error',
-          code: result.code,
-          note: result.note || ''
+      if (responseCode !== 0) {
+        const note = String(result?.note || result?.val || result?.raw || 'Device returned an empty or malformed response').slice(0, 500);
+        const error = `querysms failed (code ${result?.code ?? 'unknown'}): ${note}`;
+        recordInterfaceLog({
+          dev_id: devId,
+          protocol: 'device-http',
+          direction: 'out',
+          endpoint: '/ctrl',
+          method: 'GET',
+          status: 'failed',
+          request_summary: `cmd=querysms offset=${offset} limit=${pageLimit} slot=${slotFilter || 'all'}`,
+          response_summary: error,
+          request_raw: { cmd: 'querysms', p1: offset, p2: pageLimit, p4: slotFilter || undefined },
+          response_raw: result,
+          remote_addr: device.wifi_ip
+        });
+        return res.status(responseCode === 100 ? 401 : 400).json({
+          error,
+          code: result?.code,
+          note,
+          device_response: result
         });
       }
 
       const records = result.results || [];
       allSms = allSms.concat(records);
+      limit = pageLimit;
 
       // Pagination: if we got limit+1 records, there are more
       hasMore = records.length > limit;
@@ -147,8 +186,8 @@ router.post('/:devId/sync-sms', async (req, res) => {
         offset += limit;
       }
 
-      // Safety: max 500 records per sync
-      if (allSms.length >= 500) break;
+      // Device SMS storage is limited to 100 records.
+      if (allSms.length >= 100) break;
     }
 
     // Save to database
