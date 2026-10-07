@@ -15,6 +15,7 @@ router.post('/:devId/send', async (req, res) => {
   try {
     const { devId } = req.params;
     const { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, tid } = req.body;
+    const isRecordingUrlCommand = cmd === 'setamrurl' || cmd === 'askamrurl';
 
     if (!cmd) {
       return res.status(400).json({ error: 'Missing cmd parameter' });
@@ -62,37 +63,38 @@ router.post('/:devId/send', async (req, res) => {
       endpoint: '/ctrl',
       method: 'GET',
       status: 'ok',
-      request_summary: `cmd=${cmd}${p1 !== undefined ? ` p1=${p1}` : ''}${p2 !== undefined ? ` p2=${p2}` : ''}`,
+      request_summary: isRecordingUrlCommand ? `cmd=${cmd} (URL redacted)` : `cmd=${cmd}${p1 !== undefined ? ` p1=${p1}` : ''}${p2 !== undefined ? ` p2=${p2}` : ''}`,
       response_summary: `code=${result.code ?? ''}`,
-      request_raw: { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, tid },
-      response_raw: result,
+      request_raw: isRecordingUrlCommand ? { cmd, url: '[redacted]' } : { cmd, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, tid },
+      response_raw: isRecordingUrlCommand ? { code: result.code } : result,
       remote_addr: device.wifi_ip
     });
 
-    // Command succeeded - mark device as online
+    // A command response is not a device heartbeat.
     const ts = now();
-    db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
-      .run(ts, ts, devId);
+    db.prepare('UPDATE devices SET updated_at = ? WHERE dev_id = ?').run(ts, devId);
 
-    // Store command result as a message
-    try {
-      storeMessage({
-        devId,
-        type: 999,
-        slot: 0,
-        phone: '',
-        content: JSON.stringify(result),
-        rawJson: JSON.stringify({ ...result, _cmd: cmd, _direction: 'response' }),
-        receivedAt: ts,
-        msgTs: ts,
-        dedupeKey: `command:${devId}:${cmd}:${Date.now()}`,
-        message: { ...result, _cmd: cmd, _direction: 'response' }
-      });
-    } catch (e) {
-      console.error('Error storing command result:', e.message);
+    // Recording URLs may contain an upload key and must not enter message history.
+    if (!isRecordingUrlCommand) {
+      try {
+        storeMessage({
+          devId,
+          type: 999,
+          slot: 0,
+          phone: '',
+          content: JSON.stringify(result),
+          rawJson: JSON.stringify({ ...result, _cmd: cmd, _direction: 'response' }),
+          receivedAt: ts,
+          msgTs: ts,
+          dedupeKey: `command:${devId}:${cmd}:${Date.now()}`,
+          message: { ...result, _cmd: cmd, _direction: 'response' }
+        });
+      } catch (e) {
+        console.error('Error storing command result:', e.message);
+      }
     }
 
-    res.json({ result, url });
+    res.json(isRecordingUrlCommand ? { result } : { result, url });
   } catch (err) {
     console.error('Command error:', err.message);
     recordInterfaceLog({
@@ -104,7 +106,9 @@ router.post('/:devId/send', async (req, res) => {
       status: 'failed',
       request_summary: `cmd=${req.body?.cmd || ''}`,
       response_summary: err.message,
-      request_raw: req.body,
+      request_raw: ['setamrurl', 'askamrurl'].includes(req.body?.cmd)
+        ? { cmd: req.body.cmd, url: '[redacted]' }
+        : req.body,
       response_raw: '',
       remote_addr: ''
     });
@@ -158,7 +162,6 @@ router.post('/:devId/quick/:cmd', async (req, res) => {
           sim2_plmn = COALESCE(NULLIF(?, ''), sim2_plmn),
           sim2_sc_name = COALESCE(NULLIF(?, ''), sim2_sc_name),
           last_stat_at = ?,
-          last_ping_at = ?,
           is_online = 1,
           updated_at = ?
         WHERE dev_id = ?
@@ -178,16 +181,16 @@ router.post('/:devId/quick/:cmd', async (req, res) => {
         result.slotInfo?.sim2_msIsdn || '',
         result.slotInfo?.sim2_plmn || '',
         result.slotInfo?.sim2_scName || '',
-        ts, ts, ts,
+        ts, ts,
         devId
       );
     }
 
-    // If ping command succeeded, mark device as online
+    // A ping command response confirms reachability but is not a PING report.
     if (cmd === 'ping' && isSuccessfulDeviceResponse(result)) {
       const ts = now();
-      db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
-        .run(ts, ts, devId);
+      db.prepare('UPDATE devices SET is_online = 1, updated_at = ? WHERE dev_id = ?')
+        .run(ts, devId);
     }
 
     recordInterfaceLog({

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const db = require('./db');
 const { now } = require('./utils');
+const { isBetterSmsContent, areLikelySameSms } = require('./sms-quality');
 
 const insertMessage = db.prepare(`
   INSERT INTO messages (dev_id, type, slot, phone, content, raw_json, received_at, msg_ts, dedupe_key)
@@ -8,7 +9,7 @@ const insertMessage = db.prepare(`
 `);
 const findDedup = db.prepare('SELECT message_id FROM message_dedup WHERE dedupe_key = ?');
 const findSms = db.prepare(`
-  SELECT id FROM messages
+  SELECT id, content FROM messages
   WHERE dev_id = ? AND type = ? AND slot = ? AND phone = ? AND msg_ts = ? AND msg_ts > 0
 `);
 const insertDedup = db.prepare(`
@@ -20,6 +21,17 @@ const touchDedup = db.prepare(`
   SET last_seen_at = ?, duplicate_count = duplicate_count + 1
   WHERE dedupe_key = ?
 `);
+const improveSms = db.prepare('UPDATE messages SET content = ?, raw_json = ? WHERE id = ?');
+
+function improveSmsIfUseful(id, record) {
+  if (record.type !== 501 && record.type !== 502) return false;
+  const existing = db.prepare('SELECT content FROM messages WHERE id = ?').get(id);
+  if (existing && isBetterSmsContent(existing.content, record.content)) {
+    improveSms.run(record.content, record.rawJson, id);
+    return true;
+  }
+  return false;
+}
 
 function stableStringify(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -42,7 +54,7 @@ function getExternalId(message = {}) {
 function createDedupeKey(record) {
   const { devId, type, slot, phone, msgTs, message = {} } = record;
   if ((type === 501 || type === 502) && msgTs > 0) {
-    return `sms:${hash([devId, type, slot, normalizePhone(phone), msgTs].join('|'))}`;
+    return `sms2:${hash([devId, type, slot, normalizePhone(phone), msgTs, record.content].join('|'))}`;
   }
   const externalId = getExternalId(message);
   if (externalId !== '') {
@@ -75,15 +87,18 @@ const storeMessageTransaction = db.transaction((input) => {
   const known = findDedup.get(record.dedupeKey);
   if (known) {
     touchDedup.run(ts, record.dedupeKey);
-    return { id: Number(known.message_id), duplicate: true, dedupeKey: record.dedupeKey };
+    const improved = improveSmsIfUseful(known.message_id, record);
+    return { id: Number(known.message_id), duplicate: true, improved, dedupeKey: record.dedupeKey };
   }
 
   // Databases created before the dedup table may already contain this SMS.
   if ((record.type === 501 || record.type === 502) && record.msgTs > 0) {
-    const existingSms = findSms.get(record.devId, record.type, record.slot, record.phone, record.msgTs);
+    const existingSms = findSms.all(record.devId, record.type, record.slot, record.phone, record.msgTs)
+      .find((candidate) => areLikelySameSms(candidate.content, record.content));
     if (existingSms) {
+      const improved = improveSmsIfUseful(existingSms.id, record);
       insertDedup.run(record.dedupeKey, record.devId, existingSms.id, ts, ts);
-      return { id: Number(existingSms.id), duplicate: true, dedupeKey: record.dedupeKey };
+      return { id: Number(existingSms.id), duplicate: true, improved, dedupeKey: record.dedupeKey };
     }
   }
 

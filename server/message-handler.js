@@ -4,6 +4,8 @@ const { broadcast } = require('./ws');
 const { processPushRules } = require('./push-engine');
 const { storeMessage } = require('./message-store');
 const logger = require('./logger');
+const { recordIncomingMessage } = require('./watchdog');
+const { scheduleCallSync } = require('./call-sync');
 
 // Prepared statements for performance
 const upsertDevice = db.prepare(`
@@ -77,7 +79,7 @@ function processMessage(msg) {
     }
 
     const type = Number(msg.type);
-    if (!Number.isFinite(type)) {
+    if (msg.type === undefined || msg.type === null || String(msg.type).trim() === '' || !Number.isFinite(type)) {
       const err = new Error('Message type is invalid');
       err.permanent = true;
       throw err;
@@ -94,7 +96,7 @@ function processMessage(msg) {
       (slot === 1 ? (msg.sim1_msIsdn || msg.slotInfo?.sim1_msIsdn || '') : '') ||
       (slot === 2 ? (msg.sim2_msIsdn || msg.slotInfo?.sim2_msIsdn || '') : '')
     );
-    const content = String(msg.smsBd || msg.content || msg.val || msg.note || '');
+    const content = String(msg.smsBd || msg.content || msg.telMediaId || msg.val || msg.note || '');
     const rawJson = JSON.stringify(msg);
 
     // The storage transaction makes retries idempotent after a process restart.
@@ -125,6 +127,8 @@ function processMessage(msg) {
         raw_json: rawJson
       });
     }
+
+    if (type === 603 || type === 623) scheduleCallSync(devId);
 
     // Extract SIM info
     const sim1_icc_id = msg.sim1_iccId || (msg.slot == 1 ? (msg.iccId || '') : '');
@@ -209,6 +213,8 @@ function processMessage(msg) {
       case 623: // Outgoing hangup
       case 641: // Local DTMF
       case 642: // Remote DTMF
+      case 695: // Recording upload succeeded
+      case 696: // Recording upload failed
         // Ensure device exists and update SIM info
         upsertDevice.run({
           devId,
@@ -241,6 +247,15 @@ function processMessage(msg) {
           updatedAt: ts
         });
         break;
+    }
+
+    try {
+      recordIncomingMessage(msg, stored.duplicate);
+    } catch (watchdogErr) {
+      // Health tracking is auxiliary and must not cause a durable inbound event to retry.
+      logger.error("watchdog", "Could not record incoming health event", {
+        error: watchdogErr.message, devId, type
+      });
     }
 
     return stored;

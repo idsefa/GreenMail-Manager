@@ -83,4 +83,11 @@ export const api = {
     request(`/devices/${devId}/enable-sms-storage`, { method: 'POST', body: { slot } }),
   syncSms: (devId, slot = 0) =>
     request(`/devices/${devId}/sync-sms`, { method: 'POST', body: { slot } }),
+  syncCalls: (devId, slot = 0) =>
+    request(`/devices/${devId}/sync-calls`, { method: 'POST', body: { slot } }),
+  getCallRecords: (params = {}) => request(`/call-records?${new URLSearchParams(params)}`),
+  getRecordings: (params = {}) => request(`/recordings?${new URLSearchParams(params)}`),
+  getRecordingUrl: (mediaId) => `${BASE}/recordings/${encodeURIComponent(mediaId)}/file`,
+  getWatchdog: (devId) => request(`/devices/${devId}/watchdog`),
+  updateWatchdog: (devId, settings) => request(`/devices/${devId}/watchdog`, { method: 'PUT', body: settings }),
 };

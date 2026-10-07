@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { getDeviceDisplayParts } from '../utils/device-label';
 
 const typeLabels = {
@@ -24,6 +24,8 @@ const typeLabels = {
   623: 'Out Hangup',
   641: 'Local DTMF',
   642: 'Remote DTMF',
+  695: 'Recording uploaded',
+  696: 'Recording upload failed',
   998: 'PING',
   999: 'Command',
 };
@@ -75,8 +77,8 @@ export default function MessageTable({ messages = [], showDevice = true, deviceN
           {messages.map((msg) => {
             const deviceDisplay = getDeviceDisplayParts(msg, { preferName: deviceNameFirst });
             return (
+              <Fragment key={msg.id}>
               <tr
-                key={msg.id}
                 className="hover:bg-gray-50 cursor-pointer"
                 onClick={() => setExpanded(expanded === msg.id ? null : msg.id)}
               >
@@ -102,17 +104,19 @@ export default function MessageTable({ messages = [], showDevice = true, deviceN
                   {msg.content || '-'}
                 </td>
               </tr>
+              {expanded === msg.id && (
+                <tr>
+                  <td colSpan={showDevice ? 6 : 5} className="px-3 py-3 bg-gray-50">
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-900 p-3 text-xs text-green-300">{JSON.stringify(msg, null, 2)}</pre>
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             );
           })}
         </tbody>
       </table>
 
-      {/* Expanded JSON view */}
-      {expanded && (
-        <div className="p-4 bg-gray-800 text-green-400 text-xs font-mono overflow-auto max-h-64">
-          <pre>{JSON.stringify(messages.find(m => m.id === expanded), null, 2)}</pre>
-        </div>
-      )}
     </div>
   );
 }

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useLang } from '../i18n.jsx';
 
-export default function CommandPanel({ device, onResult, isCallActive = false }) {
+export default function CommandPanel({ device, onResult }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [smsSlot, setSmsSlot] = useState(1);
@@ -214,7 +214,7 @@ export default function CommandPanel({ device, onResult, isCallActive = false })
         </div>
       </div>
 
-      {isCallActive ? (
+      {(
         <>
           {/* Start Recording */}
           <div>
@@ -271,26 +271,19 @@ export default function CommandPanel({ device, onResult, isCallActive = false })
             </div>
           </div>
 
-          {/* Upload Recording */}
-          <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('deviceDetail.uploadRecording')}</h3>
-            <div className="flex flex-wrap gap-2 items-end">
-              <div className="flex-1">
-                <label className="text-xs text-gray-500">{t('deviceDetail.filename')}</label>
-                <input type="text" value={uploadFilename} onChange={e => setUploadFilename(e.target.value)}
-                  placeholder={t('deviceDetail.uploadFilenamePlaceholder')} className="block border rounded px-2 py-1 text-sm w-full" />
-              </div>
-              <button onClick={uploadRecording} disabled={loading || !uploadFilename} className={primaryBtn}>
-                {t('deviceDetail.upload')}
-              </button>
-            </div>
-          </div>
         </>
-      ) : (
-        <div className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded p-3">
-          Call recording controls are shown only during an active call.
-        </div>
       )}
+
+      <div>
+        <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('deviceDetail.uploadRecording')}</h3>
+        <div className="flex flex-wrap gap-2 items-end">
+          <label className="flex-1 text-xs text-gray-500">{t('deviceDetail.filename')}
+            <input type="text" value={uploadFilename} onChange={e => setUploadFilename(e.target.value)}
+              placeholder={t('deviceDetail.uploadFilenamePlaceholder')} className="mt-1 block w-full rounded border px-2 py-1 text-sm" />
+          </label>
+          <button onClick={uploadRecording} disabled={loading || !uploadFilename} className={primaryBtn}>{t('deviceDetail.upload')}</button>
+        </div>
+      </div>
 
       {/* Custom Command */}
       <div>

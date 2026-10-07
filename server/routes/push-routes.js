@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const { buildPushRequest, formatFetchError } = require('../push-engine');
+const logger = require('../logger');
 
 const router = express.Router();
 
@@ -134,6 +135,7 @@ router.post('/:id/test', async (req, res) => {
     body = request.body;
     const response = await fetch(url, request.fetchOpts);
     const responseBody = await response.text().catch(() => '');
+    logger[response.ok ? 'info' : 'warn']('push', 'Push rule test completed', { ruleId: rule.id, httpStatus: response.status, success: response.ok });
 
     res.json({
       status: response.ok ? 'success' : 'failed',
@@ -143,6 +145,7 @@ router.post('/:id/test', async (req, res) => {
       body_sent: body
     });
   } catch (err) {
+    logger.error('push', 'Push rule test failed', { ruleId: req.params.id, error: err.message });
     console.error('Error testing push rule:', err);
     res.json({
       status: 'failed',

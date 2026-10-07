@@ -13,6 +13,7 @@ services:
       TZ: "${TZ:-Asia/Shanghai}"
       NODE_ENV: production
       PORT: 3000
+      HTTP_HOST: 0.0.0.0
       TCP_PORT: 3888
       DATA_DIR: /data
     healthcheck:

@@ -22,7 +22,8 @@ router.get('/', (req, res) => {
     const ts = now();
     const devices = rows.map(d => {
       const online = isDeviceOnline(d.last_ping_at, d.ping_intvl);
-      return { ...d, is_online: online ? 1 : 0, admin_token: calcAdminToken(d.admin_password) };
+      const { admin_password, ...publicDevice } = d;
+      return { ...publicDevice, is_online: online ? 1 : 0, admin_token: calcAdminToken(admin_password) };
     });
 
     res.json({ devices });
@@ -43,6 +44,7 @@ router.get('/:devId', (req, res) => {
     const online = isDeviceOnline(device.last_ping_at, device.ping_intvl);
     device.is_online = online ? 1 : 0;
     device.admin_token = calcAdminToken(device.admin_password);
+    delete device.admin_password;
 
     res.json({ device });
   } catch (err) {
@@ -74,6 +76,7 @@ router.put('/:devId', (req, res) => {
       return res.status(404).json({ error: 'Device not found' });
     }
     device.admin_token = calcAdminToken(device.admin_password);
+    delete device.admin_password;
     const online = isDeviceOnline(device.last_ping_at, device.ping_intvl);
     device.is_online = online ? 1 : 0;
 
@@ -141,10 +144,11 @@ router.post('/', async (req, res) => {
         if (existing) {
           // Update IP and mark online
           const ts = now();
-          db.prepare('UPDATE devices SET wifi_ip = ?, last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
+          db.prepare('UPDATE devices SET wifi_ip = ?, is_online = 1, last_stat_at = ?, updated_at = ? WHERE dev_id = ?')
             .run(ip, ts, ts, devId);
           const device = db.prepare('SELECT * FROM devices WHERE dev_id = ?').get(devId);
           device.admin_token = calcAdminToken(device.admin_password);
+          delete device.admin_password;
           device.is_online = 1;
           return res.json({ device, auto_detected: true });
         }
@@ -155,8 +159,8 @@ router.post('/', async (req, res) => {
           INSERT INTO devices (dev_id, wifi_ip, name, hw_ver, wifi_ssid, wifi_dbm, ping_intvl,
             sim1_icc_id, sim1_imsi, sim1_phone, sim1_plmn, sim1_sc_name,
             sim2_icc_id, sim2_imsi, sim2_phone, sim2_plmn, sim2_sc_name,
-            admin_password, last_ping_at, is_online, last_stat_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            admin_password, is_online, last_stat_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         `).run(
           devId, ip, name || '',
           result.hwVer || '', result.wifi?.ssid || '', Number(result.wifi?.dbm || 0), Number(result.pingIntvl || 0),
@@ -164,11 +168,12 @@ router.post('/', async (req, res) => {
           result.slotInfo?.sim1_plmn || '', result.slotInfo?.sim1_scName || '',
           result.slotInfo?.sim2_iccId || '', result.slotInfo?.sim2_imsi || '', result.slotInfo?.sim2_msIsdn || '',
           result.slotInfo?.sim2_plmn || '', result.slotInfo?.sim2_scName || '',
-          password, ts, ts, ts, ts
+          password, ts, ts, ts
         );
 
         const device = db.prepare('SELECT * FROM devices WHERE dev_id = ?').get(devId);
         device.admin_token = calcAdminToken(device.admin_password);
+        delete device.admin_password;
         device.is_online = 1;
         return res.json({ device, auto_detected: true });
 
@@ -204,6 +209,7 @@ router.post('/', async (req, res) => {
 
     const device = db.prepare('SELECT * FROM devices WHERE dev_id = ?').get(devId);
     device.admin_token = calcAdminToken(device.admin_password);
+    delete device.admin_password;
     device.is_online = 0;
 
     res.json({ device });
@@ -213,10 +219,14 @@ router.post('/', async (req, res) => {
   }
 });
 
-// DELETE /api/devices/:devId - Delete a device and its messages
+// DELETE /api/devices/:devId - Delete a device and its indexed data
 router.delete('/:devId', (req, res) => {
   try {
     deleteDeviceMessageData(req.params.devId);
+    db.prepare('DELETE FROM call_records WHERE dev_id = ?').run(req.params.devId);
+    db.prepare('DELETE FROM call_sync_jobs WHERE dev_id = ?').run(req.params.devId);
+    db.prepare('DELETE FROM sim_slot_health WHERE dev_id = ?').run(req.params.devId);
+    db.prepare('DELETE FROM device_watchdog WHERE dev_id = ?').run(req.params.devId);
     db.prepare('DELETE FROM devices WHERE dev_id = ?').run(req.params.devId);
     res.json({ status: 'ok' });
   } catch (err) {

@@ -20,19 +20,6 @@ function timeAgo(ts, t) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function isActiveCall(messages) {
-  const activeTypes = new Set([601, 602, 620, 621, 622]);
-  const endTypes = new Set([603, 623]);
-
-  for (const m of messages || []) {
-    const t = Number(m.type);
-    if (activeTypes.has(t)) return true;
-    if (endTypes.has(t)) return false;
-  }
-
-  return false;
-}
-
 function parseSmsStorageEnabled(val) {
   if (!val || typeof val !== 'string') return null;
   const parts = val.split(';').map(s => s.trim()).filter(Boolean);
@@ -59,6 +46,34 @@ function getCommandError(command, payload) {
   return `${command} failed (code ${code}): ${note}`;
 }
 
+function watchdogStatusLabel(status, lang) {
+  const labels = {
+    awaiting_heartbeat: ['等待心跳', 'Awaiting heartbeat'],
+    heartbeat_timeout: ['心跳超时', 'Heartbeat timed out'],
+    healthy: ['正常', 'Healthy'],
+    verifying: ['正在核验', 'Verifying'],
+    reporting_stale: ['可连接，心跳未恢复', 'Reachable, heartbeat stale'],
+    unreachable: ['无法连接', 'Unreachable'],
+    restart_scheduled: ['已安排重启', 'Restart scheduled'],
+    restart_waiting: ['等待重启后心跳', 'Awaiting post-restart heartbeat'],
+    restart_failed: ['重启失败', 'Restart failed'],
+    restart_cooldown: ['重启冷却中', 'Restart cooldown'],
+    restart_limit_reached: ['达到每日上限', 'Daily limit reached'],
+    recovery_disabled: ['自动恢复已关闭', 'Recovery disabled'],
+    call_active: ['通话中，暂缓重启', 'Call active, restart deferred'],
+    online: ['正常', 'Online'],
+    ready: ['就绪', 'Ready'],
+    initializing: ['初始化中', 'Initializing'],
+    ejected: ['未插卡', 'No SIM'],
+    error: ['异常', 'Error'],
+    modem_error: ['通信模组异常', 'Modem error'],
+    recovering: ['恢复中', 'Recovering'],
+    waiting_for_device: ['等待设备在线', 'Waiting for device'],
+    manual_attention: ['需要人工处理', 'Manual attention'],
+  };
+  return labels[status]?.[lang === 'zh' ? 0 : 1] || (lang === 'zh' ? '未收到状态事件' : 'No status event');
+}
+
 export default function DeviceDetail() {
   const { devId } = useParams();
   const [device, setDevice] = useState(null);
@@ -83,6 +98,13 @@ export default function DeviceDetail() {
   const [simCardInfo, setSimCardInfo] = useState({});
   const [simCardLoading, setSimCardLoading] = useState({});
   const [statusRefreshing, setStatusRefreshing] = useState(false);
+  const [watchdog, setWatchdog] = useState(null);
+  const [watchdogLogs, setWatchdogLogs] = useState([]);
+  const [watchdogBusy, setWatchdogBusy] = useState(false);
+  const [watchdogError, setWatchdogError] = useState('');
+  const [recordingUrl, setRecordingUrl] = useState('');
+  const [recordingUrlBusy, setRecordingUrlBusy] = useState(false);
+  const [recordingUrlError, setRecordingUrlError] = useState('');
   // OTA state
   const [otaDelay, setOtaDelay] = useState(10);
   // SMS Management state
@@ -98,14 +120,14 @@ export default function DeviceDetail() {
     return [5, 10, 30, 60].includes(stored) ? stored : 10;
   });
   const autoRefreshBusyRef = useRef(false);
-  const { t } = useLang();
+  const { t, lang } = useLang();
 
   useEffect(() => {
     loadDevice();
     loadMessages();
     querySmsStorageStatus();
     loadSavedWifi();
-    pingDeviceOnce();
+    loadWatchdog();
 
     const unsub = subscribe((msg) => {
       if (msg.type === 'device_update' && msg.data?.dev_id === devId) {
@@ -164,22 +186,57 @@ export default function DeviceDetail() {
     }
   }
 
-  async function pingDeviceOnce() {
-    try {
-      await api.quickCommand(devId, 'ping');
-      loadDevice();
-    } catch (err) {
-      console.error('Failed to ping device on entry:', err);
-    }
-  }
-
   async function refreshOverview() {
     if (autoRefreshBusyRef.current) return;
     autoRefreshBusyRef.current = true;
     try {
-      await Promise.all([loadDevice(), loadMessages()]);
+      await Promise.all([loadDevice(), loadMessages(), loadWatchdog()]);
     } finally {
       autoRefreshBusyRef.current = false;
+    }
+  }
+
+  async function loadWatchdog() {
+    try {
+      const [status, logs] = await Promise.all([
+        api.getWatchdog(devId),
+        api.getSystemLogs({ scope: 'watchdog', search: devId, limit: 5 })
+      ]);
+      setWatchdog(status);
+      setWatchdogLogs(logs.logs || []);
+      setWatchdogError('');
+    } catch (err) {
+      setWatchdogError(err.message);
+    }
+  }
+
+  async function changeWatchdog(patch) {
+    setWatchdogBusy(true);
+    setWatchdogError('');
+    try {
+      const status = await api.updateWatchdog(devId, patch);
+      setWatchdog(status);
+      await loadWatchdog();
+    } catch (err) {
+      setWatchdogError(err.message);
+    } finally {
+      setWatchdogBusy(false);
+    }
+  }
+
+  async function manageRecordingUrl(command) {
+    setRecordingUrlBusy(true);
+    setRecordingUrlError('');
+    try {
+      const data = await api.sendCommand(devId, command, command === 'setamrurl' ? { p1: recordingUrl } : {});
+      const result = data?.result || data;
+      if (getDeviceResponseCode(result?.code) !== 0) throw new Error(getCommandError(command, result));
+      if (command === 'askamrurl') setRecordingUrl(String(result?.val || ''));
+      setCmdResult({ result });
+    } catch (err) {
+      setRecordingUrlError(err.message);
+    } finally {
+      setRecordingUrlBusy(false);
     }
   }
 
@@ -423,7 +480,6 @@ export default function DeviceDetail() {
   if (loading) return <div className="text-gray-500">{t('common.loading')}</div>;
   if (!device) return <div className="text-red-500">{t('deviceDetail.deviceNotFound')}</div>;
 
-  const callActive = isActiveCall(messages);
   const deletableWifi = savedWifi.filter(item => item.ssid.toLowerCase() !== 'lzwifi');
 
   return (
@@ -573,11 +629,52 @@ export default function DeviceDetail() {
         </div>
       </div>
 
+      <section className="mb-6 rounded-lg bg-white p-6 shadow">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-lg font-semibold text-gray-700">{lang === 'zh' ? '设备与 SIM 看门狗' : 'Device and SIM Watchdog'}</h3>
+          <button type="button" onClick={loadWatchdog} className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 hover:bg-gray-50">{lang === 'zh' ? '刷新' : 'Refresh'}</button>
+        </div>
+        {watchdogError && <p role="alert" className="mb-3 text-sm text-red-700">{watchdogError}</p>}
+        {watchdog && <>
+          <div className="grid gap-3 text-sm md:grid-cols-3">
+            <label className="flex items-center gap-2 text-gray-700"><input type="checkbox" disabled={watchdogBusy} checked={Boolean(watchdog.settings.enabled)} onChange={e => changeWatchdog({ enabled: e.target.checked })} />{lang === 'zh' ? '启用看门狗' : 'Enable watchdog'}</label>
+            <label className="flex items-center gap-2 text-gray-700"><input type="checkbox" disabled={watchdogBusy || !watchdog.settings.enabled} checked={Boolean(watchdog.settings.auto_device_restart)} onChange={e => changeWatchdog({ auto_device_restart: e.target.checked })} />{lang === 'zh' ? '设备异常自动重启' : 'Restart device on fault'}</label>
+            <label className="flex items-center gap-2 text-gray-700"><input type="checkbox" disabled={watchdogBusy || !watchdog.settings.enabled} checked={Boolean(watchdog.settings.auto_sim_restart)} onChange={e => changeWatchdog({ auto_sim_restart: e.target.checked })} />{lang === 'zh' ? 'SIM 注册超时自动重启卡槽' : 'Restart SIM slot on registration timeout'}</label>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-4 border-t border-gray-200 pt-4 text-sm md:grid-cols-4">
+            <InfoItem label={lang === 'zh' ? '设备状态' : 'Device status'} value={watchdogStatusLabel(watchdog.deviceStatus, lang)} />
+            <InfoItem label={lang === 'zh' ? '最近心跳' : 'Last heartbeat'} value={timeAgo(watchdog.lastHeartbeatAt, t)} />
+            <InfoItem label={lang === 'zh' ? '最后自动重启' : 'Last restart'} value={formatTime(watchdog.settings.last_device_restart_at, t)} />
+            <InfoItem label={lang === 'zh' ? '每日恢复上限' : 'Daily recovery limit'} value={watchdog.policy.maxRecoveriesPerDay} />
+            {[1, 2].map(slot => {
+              const health = watchdog.slots.find(item => item.slot === slot);
+              const value = `${watchdogStatusLabel(health?.status, lang)}${health?.error_code ? ` (${health.error_code})` : ''}`;
+              return <InfoItem key={slot} label={`SIM ${slot}`} value={value} />;
+            })}
+          </div>
+          {watchdogLogs.length > 0 && <div className="mt-4 border-t border-gray-200 pt-3 text-sm text-gray-600">
+            {watchdogLogs.map(log => <div key={log.id} className="flex flex-wrap gap-x-3 py-1"><span className="text-gray-400">{formatTime(log.created_at, t)}</span><span>{lang === 'zh' && log.message === 'Watchdog settings updated' ? '看门狗设置已更新' : log.message}</span></div>)}
+          </div>}
+        </>}
+      </section>
+
       {/* Command Panel */}
       <div className="bg-white rounded-lg shadow p-6 mb-6">
         <h3 className="text-lg font-semibold text-gray-700 mb-4">{t('deviceDetail.controlCommands')}</h3>
-        <CommandPanel device={device} onResult={handleCommandResult} isCallActive={callActive} />
+        <CommandPanel device={device} onResult={handleCommandResult} />
       </div>
+
+      <section className="mb-6 border-y border-gray-200 bg-white py-5">
+        <h3 className="mb-3 text-lg font-semibold text-gray-700">{lang === 'zh' ? '通话录音上报地址' : 'Recording Upload URL'}</h3>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="min-w-64 flex-1 text-sm text-gray-600">URL
+            <input value={recordingUrl} onChange={e => setRecordingUrl(e.target.value)} placeholder="https://example.com/api/recordings/upload" className="mt-1 block w-full rounded border px-2 py-1.5 text-sm" />
+          </label>
+          <button type="button" disabled={recordingUrlBusy} onClick={() => manageRecordingUrl('askamrurl')} className="rounded border px-3 py-1.5 text-sm disabled:opacity-50">{lang === 'zh' ? '读取' : 'Read'}</button>
+          <button type="button" disabled={recordingUrlBusy || !recordingUrl.trim()} onClick={() => manageRecordingUrl('setamrurl')} className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{lang === 'zh' ? '保存' : 'Save'}</button>
+        </div>
+        {recordingUrlError && <p role="alert" className="mt-2 text-sm text-red-700">{recordingUrlError}</p>}
+      </section>
 
       {/* WiFi Management */}
       <div className="bg-white rounded-lg shadow p-6 mb-6">

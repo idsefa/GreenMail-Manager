@@ -411,10 +411,18 @@ volumes:
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP 服务端口 |
+| `HTTP_HOST` | `0.0.0.0` | HTTP 监听地址；可设为 `127.0.0.1` 限制仅本机访问 |
 | `TCP_PORT` | `3888` | 设备 TCP 上报端口 |
 | `DATA_DIR` | `./data` | SQLite 数据目录 |
-| `PING_POLL_INTERVAL` | `30000` | 管理端主动 ping 设备的轮询间隔，单位毫秒 |
+| `WATCHDOG_INTERVAL_MS` | `30000` | 被动心跳状态检查间隔，单位毫秒 |
+| `WATCHDOG_VERIFY_GRACE_SECONDS` | `120` | 心跳超时后，一次 `stat` 验证与自动重启之间的等待时间 |
+| `WATCHDOG_RESTART_GRACE_SECONDS` | `180` | 重启后等待设备重新上报心跳的时间 |
+| `WATCHDOG_DEVICE_RESTART_COOLDOWN_SECONDS` | `900` | 设备自动重启冷却时间 |
+| `WATCHDOG_SIM_RECOVERY_COOLDOWN_SECONDS` | `900` | SIM 卡槽自动恢复冷却时间 |
+| `WATCHDOG_MAX_RECOVERIES_PER_DAY` | `2` | 每台设备及每个卡槽每天最多自动恢复次数 |
 | `TZ` | `Asia/Shanghai` | 容器时区 |
+
+管理界面、管理 API、设备上报和录音上传均不要求登录。请仅在可信内网开放服务，不要直接暴露到公网。
 
 ## 接入方式
 
@@ -454,6 +462,12 @@ TCP 服务默认端口：
 - 发短信
 - 重启
 - 其他命令下发
+
+在线判断以设备主动上报的 `PING` 为准。设备详情页可逐台启用看门狗；心跳超时后仅进行一次 `stat` 验证，仍可访问且心跳未恢复时才尝试受限自动重启。设备无法访问时只记录告警。SIM 注册超时（`209/note=3`）可在设备在线时自动重启对应卡槽；PIN/PUK 锁定、欠费或通信模组故障只告警。默认关闭自动恢复。
+
+通话页可使用 `querytel` 同步设备本地最近 50 条记录。收到通话挂断事件后，系统也会延迟拉取并持久化重试；设备须先通过 `storetelen` 开启本地通话存储。实时通话事件及录音上传成功/失败事件（`695/696`）可在“通话事件”中查看。开始、停止和手动上传录音命令位于设备详情的通话控制区。
+
+接收录音文件时，在设备上将录音上报 URL（`setamrurl`）设为 `http://<管理端内网地址>:3000/api/recordings/upload?devId={{devId}}&slot={{slot}}&phNum={{phNum|$urlEncode()}}&telStartTs={{telStartTs}}`。设备上传的 `media` AMR 文件保存在 `DATA_DIR/recordings`，可在通话页下载。录音缓存可能在设备重启后失效，应尽快上传。
 
 新增设备时如果只填 `wifi_ip`，系统会尝试调用：
 

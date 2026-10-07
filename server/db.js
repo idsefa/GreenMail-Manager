@@ -127,6 +127,8 @@ db.exec(`
     response_code INTEGER DEFAULT 0,
     response_body TEXT DEFAULT '',
     error TEXT DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s','now'))
   );
 
@@ -151,6 +153,77 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_interface_logs_direction ON interface_logs(direction);
   CREATE INDEX IF NOT EXISTS idx_interface_logs_status ON interface_logs(status);
   CREATE INDEX IF NOT EXISTS idx_interface_logs_created_at ON interface_logs(created_at);
+
+  CREATE TABLE IF NOT EXISTS device_watchdog (
+    dev_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    auto_device_restart INTEGER NOT NULL DEFAULT 1,
+    auto_sim_restart INTEGER NOT NULL DEFAULT 1,
+    last_ping_timeout_at INTEGER NOT NULL DEFAULT 0,
+    last_verified_at INTEGER NOT NULL DEFAULT 0,
+    last_device_restart_at INTEGER NOT NULL DEFAULT 0,
+    device_restart_count INTEGER NOT NULL DEFAULT 0,
+    device_restart_window_started_at INTEGER NOT NULL DEFAULT 0,
+    last_device_status TEXT NOT NULL DEFAULT 'unknown',
+    last_device_reason TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS sim_slot_health (
+    dev_id TEXT NOT NULL,
+    slot INTEGER NOT NULL CHECK (slot IN (1, 2)),
+    status TEXT NOT NULL DEFAULT 'unknown',
+    last_event_type INTEGER NOT NULL DEFAULT 0,
+    last_event_at INTEGER NOT NULL DEFAULT 0,
+    error_code INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    last_recovery_at INTEGER NOT NULL DEFAULT 0,
+    recovery_count INTEGER NOT NULL DEFAULT 0,
+    recovery_window_started_at INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (dev_id, slot)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sim_slot_health_status
+    ON sim_slot_health(status, updated_at);
+
+  CREATE TABLE IF NOT EXISTS call_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dev_id TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    direction INTEGER NOT NULL,
+    phone TEXT NOT NULL DEFAULT '',
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL DEFAULT 0,
+    connected INTEGER NOT NULL DEFAULT 0,
+    raw_json TEXT NOT NULL,
+    synced_at INTEGER NOT NULL,
+    UNIQUE (dev_id, slot, direction, phone, started_at, ended_at)
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_records_started_at ON call_records(started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_call_records_dev_id ON call_records(dev_id, started_at DESC);
+
+  CREATE TABLE IF NOT EXISTS call_sync_jobs (
+    dev_id TEXT PRIMARY KEY,
+    due_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_sync_jobs_due ON call_sync_jobs(due_at);
+
+  CREATE TABLE IF NOT EXISTS recordings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id TEXT NOT NULL UNIQUE,
+    filename TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    dev_id TEXT NOT NULL DEFAULT '',
+    slot INTEGER NOT NULL DEFAULT 0,
+    phone TEXT NOT NULL DEFAULT '',
+    call_started_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_recordings_dev_id ON recordings(dev_id, created_at DESC);
 `);
 
 // Lightweight schema migration for existing databases.
@@ -159,29 +232,21 @@ if (!pushRuleColumns.includes('trigger_msisdn')) {
   db.exec("ALTER TABLE push_rules ADD COLUMN trigger_msisdn TEXT DEFAULT ''");
 }
 
+const pushLogColumns = db.prepare('PRAGMA table_info(push_logs)').all().map((c) => c.name);
+if (!pushLogColumns.includes('attempts')) db.exec('ALTER TABLE push_logs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
+if (!pushLogColumns.includes('next_attempt_at')) db.exec('ALTER TABLE push_logs ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0');
+db.exec('CREATE INDEX IF NOT EXISTS idx_push_logs_due ON push_logs(status, next_attempt_at, id)');
+
 const messageColumns = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
 if (!messageColumns.includes('dedupe_key')) {
   db.exec("ALTER TABLE messages ADD COLUMN dedupe_key TEXT DEFAULT ''");
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_dedupe_key ON messages(dedupe_key)');
 
-// Keep the oldest copy of historical SMS records before enforcing the identity
-// constraint. It protects both synced and pushed SMS from being stored twice.
-db.exec(`
-  DELETE FROM messages
-  WHERE type IN (501, 502)
-    AND msg_ts > 0
-    AND id NOT IN (
-      SELECT MIN(id)
-      FROM messages
-      WHERE type IN (501, 502) AND msg_ts > 0
-      GROUP BY dev_id, type, slot, phone, msg_ts
-    )
-`);
-db.exec(`
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_sms_identity
+// Multiple distinct SMS may share the same sender and second-level timestamp.
+db.exec('DROP INDEX IF EXISTS idx_messages_sms_identity');
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_sms_candidates
   ON messages(dev_id, type, slot, phone, msg_ts)
-  WHERE type IN (501, 502) AND msg_ts > 0
-`);
+  WHERE type IN (501, 502) AND msg_ts > 0`);
 
 module.exports = db;

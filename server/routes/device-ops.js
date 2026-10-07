@@ -3,6 +3,9 @@ const http = require('http');
 const db = require('../db');
 const { calcAdminToken, now } = require('../utils');
 const { recordInterfaceLog } = require('../interface-log');
+const { getDeviceWatchdog, updateDeviceWatchdog } = require('../watchdog');
+const { storeMessage } = require('../message-store');
+const { syncCallsFromDevice } = require('../call-sync');
 
 const router = express.Router();
 
@@ -66,11 +69,6 @@ router.post('/:devId/enable-sms-storage', async (req, res) => {
       remote_addr: device.wifi_ip
     });
 
-    // Mark as online
-    const ts = now();
-    db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
-      .run(ts, ts, devId);
-
     res.json({
       result,
       note: result.note || '',
@@ -119,14 +117,10 @@ router.post('/:devId/sync-sms', async (req, res) => {
     const token = calcAdminToken(device.admin_password);
     const ts = now();
 
-    // Mark as online since we can reach it
-    db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
-      .run(ts, ts, devId);
-
     // Some device firmware returns JSON null for a 50-record page. Start
     // conservatively and shrink the page only when a response is empty.
     let allSms = [];
-    let offset = 0;
+    let offset = 1;
     let limit = 20;
     let hasMore = true;
 
@@ -174,7 +168,8 @@ router.post('/:devId/sync-sms', async (req, res) => {
         });
       }
 
-      const records = result.results || [];
+      if (!Array.isArray(result.results)) throw new Error('querysms returned malformed results');
+      const records = result.results;
       allSms = allSms.concat(records);
       limit = pageLimit;
 
@@ -190,83 +185,26 @@ router.post('/:devId/sync-sms', async (req, res) => {
       if (allSms.length >= 100) break;
     }
 
-    // Save to database
-    const insertStmt = db.prepare(`
-      INSERT OR IGNORE INTO messages (dev_id, type, slot, phone, content, raw_json, received_at, msg_ts)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    // Strong dedup key for synced SMS:
-    // dev_id + type + slot + phone + msg_ts
-    // content is intentionally excluded because synced content may differ slightly
-    // from pushed content while still referring to the same SMS record.
-    const existingCheckByTimestamp = db.prepare(`
-      SELECT id FROM messages
-      WHERE dev_id = ? AND type = ? AND slot = ? AND phone = ? AND msg_ts = ? AND msg_ts > 0
-    `);
-
-    // Fallback when the device does not return a usable msg_ts.
-    const existingCheckByContent = db.prepare(`
-      SELECT id FROM messages
-      WHERE dev_id = ? AND type = ? AND slot = ? AND phone = ? AND content = ?
-    `);
-
-    const cleanupDuplicateSms = db.prepare(`
-      DELETE FROM messages
-      WHERE type IN (501, 502)
-        AND msg_ts > 0
-        AND dev_id = ?
-        AND id IN (
-          SELECT newer.id
-          FROM messages newer
-          JOIN messages older
-            ON older.dev_id = newer.dev_id
-           AND older.type = newer.type
-           AND older.slot = newer.slot
-           AND older.phone = newer.phone
-           AND older.msg_ts = newer.msg_ts
-           AND older.msg_ts > 0
-           AND older.id < newer.id
-          WHERE newer.dev_id = ?
-            AND newer.type IN (501, 502)
-        )
-    `);
-
     let savedCount = 0;
     let skippedCount = 0;
-
-    const saveMany = db.transaction((records) => {
-      for (const sms of records) {
-        const smsType = sms.dir === 0 ? 501 : 502; // 0=received, 1=sent
-        const slot = Number(sms.slot || 0);
-        const phone = sms.phNum || '';
-        const content = sms.smsBd || '';
-        const msgTs = Number(sms.smsTs || 0);
-
-        const existing = msgTs > 0
-          ? existingCheckByTimestamp.get(devId, smsType, slot, phone, msgTs)
-          : existingCheckByContent.get(devId, smsType, slot, phone, content);
-        if (existing) {
-          skippedCount++;
-          continue;
-        }
-
-        insertStmt.run(
-          devId,
-          smsType,
-          slot,
-          phone,
-          content,
-          JSON.stringify(sms),
-          msgTs || ts,
-          msgTs
-        );
-        savedCount++;
-      }
-    });
-
-    saveMany(allSms);
-    const cleanedCount = cleanupDuplicateSms.run(devId, devId).changes;
+    let improvedCount = 0;
+    for (const sms of allSms) {
+      const msgTs = Number(sms.smsTs || 0);
+      const stored = storeMessage({
+        devId,
+        type: Number(sms.dir) === 0 ? 501 : 502,
+        slot: Number(sms.slot || 0),
+        phone: String(sms.phNum || ''),
+        content: String(sms.smsBd || ''),
+        rawJson: JSON.stringify(sms),
+        receivedAt: msgTs || ts,
+        msgTs,
+        message: sms
+      });
+      if (stored.duplicate) skippedCount++;
+      else savedCount++;
+      if (stored.improved) improvedCount++;
+    }
 
     recordInterfaceLog({
       dev_id: devId,
@@ -276,23 +214,19 @@ router.post('/:devId/sync-sms', async (req, res) => {
       method: 'GET',
       status: 'ok',
       request_summary: `cmd=querysms slot=${slotFilter || 'all'}`,
-      response_summary: `pulled=${allSms.length} saved=${savedCount} skipped=${skippedCount} cleaned=${cleanedCount}`,
+      response_summary: `pulled=${allSms.length} saved=${savedCount} skipped=${skippedCount} improved=${improvedCount}`,
       request_raw: { cmd: 'querysms', slot: slotFilter || 0, page_size: limit },
-      response_raw: { total_pulled: allSms.length, saved: savedCount, skipped: skippedCount, cleaned: cleanedCount },
+      response_raw: { total_pulled: allSms.length, saved: savedCount, skipped: skippedCount, improved: improvedCount },
       remote_addr: device.wifi_ip
     });
-
-    // Mark as online
-    db.prepare('UPDATE devices SET last_ping_at = ?, is_online = 1, updated_at = ? WHERE dev_id = ?')
-      .run(ts, ts, devId);
 
     res.json({
       success: true,
       total_pulled: allSms.length,
       saved: savedCount,
       skipped: skippedCount,
-      cleaned: cleanedCount,
-      note: `Pulled ${allSms.length} SMS from device, saved ${savedCount} new records, cleaned ${cleanedCount} duplicates`
+      improved: improvedCount,
+      note: `Pulled ${allSms.length} SMS from device, saved ${savedCount} new records`
     });
   } catch (err) {
     console.error('Sync SMS error:', err.message);
@@ -314,6 +248,47 @@ router.post('/:devId/sync-sms', async (req, res) => {
         .run(now(), req.params.devId);
     } catch (e) { /* ignore */ }
     res.status(502).json({ error: 'Failed to reach device', detail: err.message });
+  }
+});
+
+// POST /api/devices/:devId/sync-calls - Pull device-local call records
+router.post('/:devId/sync-calls', async (req, res) => {
+  const { devId } = req.params;
+  const device = db.prepare('SELECT * FROM devices WHERE dev_id = ?').get(devId);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (!device.wifi_ip) return res.status(400).json({ error: 'Device has no known IP address' });
+
+  const slot = Number(req.body?.slot || 0);
+  if (![0, 1, 2].includes(slot)) return res.status(400).json({ error: 'Invalid slot' });
+
+  try {
+    res.json(await syncCallsFromDevice(devId, slot));
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// GET /api/devices/:devId/watchdog - Device watchdog settings and SIM health
+router.get('/:devId/watchdog', (req, res) => {
+  try {
+    const device = db.prepare('SELECT dev_id FROM devices WHERE dev_id = ?').get(req.params.devId);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    res.json(getDeviceWatchdog(req.params.devId));
+  } catch (err) {
+    console.error('Get watchdog status error:', err.message);
+    res.status(500).json({ error: 'Failed to load watchdog status' });
+  }
+});
+
+// PUT /api/devices/:devId/watchdog - Enable/disable bounded automatic recovery
+router.put('/:devId/watchdog', (req, res) => {
+  try {
+    const device = db.prepare('SELECT dev_id FROM devices WHERE dev_id = ?').get(req.params.devId);
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    res.json(updateDeviceWatchdog(req.params.devId, req.body || {}));
+  } catch (err) {
+    const isValidationError = /must be a boolean|No watchdog setting/.test(err.message);
+    res.status(isValidationError ? 400 : 500).json({ error: err.message || 'Failed to update watchdog settings' });
   }
 });
 

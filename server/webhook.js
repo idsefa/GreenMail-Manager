@@ -77,6 +77,11 @@ function hasDeviceId(obj) {
   return !!(obj && (obj.devId || obj.deviceId || obj.dev_id || obj.device_id));
 }
 
+function hasValidMessageType(msg) {
+  return msg && msg.type !== undefined && msg.type !== null &&
+    String(msg.type).trim() !== '' && Number.isFinite(Number(msg.type));
+}
+
 function parseEmbeddedPayload(raw, outer = {}) {
   if (typeof raw !== 'string') return null;
 
@@ -109,23 +114,13 @@ function parseEmbeddedPayload(raw, outer = {}) {
 }
 
 /**
- * Normalize FORM values: decode URL-encoded strings, convert numeric-looking strings.
- * FORM format has all values as strings per spec; we keep them as-is since
- * message-handler.js already does type conversion.
+ * Express and URLSearchParams have already decoded URL-encoded values.
  */
 function normalizeFormValues(obj) {
   const result = {};
   for (const [key, val] of Object.entries(obj)) {
     if (key === 'p') continue;
-    if (typeof val === 'string') {
-      try {
-        result[key] = decodeURIComponent(val);
-      } catch {
-        result[key] = val;
-      }
-    } else {
-      result[key] = val;
-    }
+    result[key] = val;
   }
 
   // Accept a few common alias styles in addition to the canonical field names.
@@ -159,6 +154,9 @@ function normalizeFormValues(obj) {
  */
 router.post('/', (req, res) => {
   const msg = parseMessage(req);
+  if (!msg?.devId || !hasValidMessageType(msg)) {
+    return res.status(400).json({ error: 'Device ID and message type are required' });
+  }
   const responseBody = msg && Number(msg.type) === 100 ? buildTimeSyncString() : { status: 'ok' };
 
   if (msg) {
@@ -221,8 +219,8 @@ router.get('/', (req, res) => {
   const msg = parseMessage(req);
   const responseBody = msg && Number(msg.type) === 100 ? buildTimeSyncString() : { status: 'ok' };
 
-  if (!msg || !msg.devId) {
-    // No valid message, still return 200 to not trigger device retry
+  if (!msg?.devId || !hasValidMessageType(msg)) {
+    // Never acknowledge a message that cannot be attributed to a device.
     recordInterfaceLog({
       protocol: 'webhook',
       direction: 'in',
@@ -230,12 +228,12 @@ router.get('/', (req, res) => {
       method: 'GET',
       status: 'ignored',
       request_summary: 'invalid payload',
-      response_summary: 'ok',
+      response_summary: 'invalid payload',
       request_raw: req.query,
-      response_raw: { status: 'ok' },
+      response_raw: { error: 'Device ID and message type are required' },
       remote_addr: req.ip
     });
-    return res.status(200).json({ status: 'ok' });
+    return res.status(400).json({ error: 'Device ID and message type are required' });
   }
 
   try {
